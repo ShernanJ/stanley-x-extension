@@ -8,5 +8,14 @@ export default defineConfig({
     version: '0.1.0',
     description: 'LinkedIn draft observer for Stanley thread pages.',
     permissions: ['storage'],
+    web_accessible_resources: [
+      {
+        resources: ['linkedin.svg', 'x.svg', 'x.png'],
+        matches: ['https://stanley.stan.store/*', 'https://*.stanley.stan.store/*'],
+      },
+    ],
   },
+  webExt: {
+    disabled: true,
+  }
 });
