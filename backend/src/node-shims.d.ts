@@ -13,6 +13,9 @@ declare module 'node:http' {
   export type IncomingMessage = {
     method?: string;
     url?: string;
+    headers: Record<string, string | string[] | undefined>;
+    socket: { remoteAddress?: string };
+    destroy(): void;
     on(event: string, handler: (...args: any[]) => void): void;
   };
 
@@ -27,6 +30,9 @@ declare module 'node:http' {
       res: ServerResponse,
     ) => void | Promise<void>,
   ): {
+    requestTimeout: number;
+    keepAliveTimeout: number;
+    headersTimeout: number;
     listen(port: number, callback?: () => void): void;
   };
 }
@@ -46,7 +52,14 @@ declare const process: {
 };
 
 declare const Buffer: {
-  concat(chunks: unknown[]): {
+  isBuffer(value: unknown): value is BufferLike;
+  from(value: string): BufferLike;
+  concat(chunks: BufferLike[]): {
     toString(encoding: string): string;
   };
+};
+
+type BufferLike = {
+  length: number;
+  toString(encoding?: string): string;
 };
