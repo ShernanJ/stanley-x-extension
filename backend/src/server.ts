@@ -4,11 +4,20 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-type WritingStyleProfile = 'cracked_engineer' | 'value_operator' | 'community';
+type WritingStyleProfile =
+  | 'cracked_engineer'
+  | 'value_operator'
+  | 'builder_in_public'
+  | 'community_builder'
+  | 'thought_leader'
+  | 'story_snap'
+  | 'relatable'
+  | 'signal_flex';
 
 type XDraftRequestBody = {
   threadId?: unknown;
   sourceText?: unknown;
+  referenceText?: unknown;
   sourceHash?: unknown;
   styleProfile?: unknown;
   rewriteInstructions?: unknown;
@@ -33,6 +42,7 @@ type GenerationRecord = {
   threadId: string;
   sourceHash: string;
   sourceText: string;
+  referenceText: string;
   styleProfile: WritingStyleProfile;
   isXVerified: boolean;
   xCharacterLimit: number;
@@ -45,6 +55,18 @@ type GenerationRecord = {
 type ChatMessage = {
   role: 'system' | 'user' | 'assistant';
   content: string;
+};
+
+type XMode = 'unverified' | 'verified';
+
+type LlmTransformOutput = {
+  x_post: string;
+  char_count: number;
+  mode: XMode;
+  archetype: WritingStyleProfile;
+  structure_used: string;
+  banned_phrases_found: string[];
+  edit_notes: string[];
 };
 
 const THIS_FILE = fileURLToPath(import.meta.url);
@@ -72,6 +94,8 @@ const X_STANDARD_CHAR_LIMIT = 280;
 const X_VERIFIED_CHAR_LIMIT = 25_000;
 const MAX_FACT_LINES = 14;
 const MAX_STYLE_RETRIES = 3;
+const GENERATION_PROMPT_VERSION =
+  '2026-02-24-unverified-build-first-v8';
 
 const cacheByThreadAndHash = new Map<string, GenerationRecord>();
 const latestByThreadAndRewrite = new Map<string, GenerationRecord>();
@@ -114,13 +138,13 @@ const FEW_SHOT_EXAMPLES: Array<{ source: string; target: string }> = [
       ].join('\n'),
     target:
       [
-        'Tested LinkedIn-to-X rewriting.',
+        'Rewrote a LinkedIn draft for X.',
         '',
         'Same core message. Different delivery.',
         '',
-        'The old draft sounded corporate.',
+        'Old draft sounded corporate.',
         '',
-        'The new draft is tighter and lands better on X.',
+        'Now it reads native on X.',
       ].join('\n'),
   },
 ];
@@ -144,15 +168,15 @@ const STYLE_PROFILE_CONFIGS: Record<WritingStyleProfile, StyleProfileConfig> = {
     label: 'Cracked Engineer',
     profilePrompt:
       [
-        'Style profile: cracked engineer.',
-        'Builder-first voice. Slightly irreverent. No corporate tone.',
-        'Usually concise. Keep punchy lines.',
-        'Lowercase style is preferred but not mandatory.',
+        'Style profile: cracked_engineer.',
+        'all lowercase.',
+        '2-5 short lines.',
+        '[sharp insight] [specific proof] [implied lesson].',
       ].join(' '),
-    minOutputChars: 180,
-    minParagraphs: 3,
-    maxParagraphs: 6,
-    maxOutputChars: 700,
+    minOutputChars: 90,
+    minParagraphs: 2,
+    maxParagraphs: 5,
+    maxOutputChars: 520,
     preferLowercase: true,
   },
   value_operator: {
@@ -160,31 +184,95 @@ const STYLE_PROFILE_CONFIGS: Record<WritingStyleProfile, StyleProfileConfig> = {
     label: 'Value Operator',
     profilePrompt:
       [
-        'Style profile: value operator.',
-        'Keep practical depth and credible specifics.',
-        'Explain what works and why in a tactical way.',
-        'This profile can run longer than cracked engineer style.',
+        'Style profile: value_operator.',
+        '[bold claim] - point - point - point [punchline] [engagement question].',
+        'Must stay tactical, specific, and high-signal.',
       ].join(' '),
-    minOutputChars: 360,
-    minParagraphs: 6,
-    maxParagraphs: 10,
-    maxOutputChars: 1100,
+    minOutputChars: 180,
+    minParagraphs: 4,
+    maxParagraphs: 9,
+    maxOutputChars: 1400,
     requireTacticalDensity: true,
   },
-  community: {
-    id: 'community',
-    label: 'Community',
+  builder_in_public: {
+    id: 'builder_in_public',
+    label: 'Builder In Public',
     profilePrompt:
       [
-        'Style profile: community.',
-        'Friendly, collaborative, human voice.',
-        'Still concise and direct, but warmer than value operator.',
+        'Style profile: builder_in_public.',
+        '[what happened] [metric] [lesson] [next step].',
       ].join(' '),
-    minOutputChars: 250,
+    minOutputChars: 140,
+    minParagraphs: 3,
+    maxParagraphs: 7,
+    maxOutputChars: 1000,
+  },
+  community_builder: {
+    id: 'community_builder',
+    label: 'Community Builder',
+    profilePrompt:
+      [
+        'Style profile: community_builder.',
+        '[community statement] [specific group or win] [shared mission] [open CTA].',
+        'Friendly but direct.',
+      ].join(' '),
+    minOutputChars: 120,
     minParagraphs: 4,
     maxParagraphs: 7,
-    maxOutputChars: 900,
+    maxOutputChars: 980,
     preferFriendlyTone: true,
+  },
+  thought_leader: {
+    id: 'thought_leader',
+    label: 'Thought Leader',
+    profilePrompt:
+      [
+        'Style profile: thought_leader.',
+        '[strong POV] [why it matters] [conclusion].',
+      ].join(' '),
+    minOutputChars: 130,
+    minParagraphs: 3,
+    maxParagraphs: 7,
+    maxOutputChars: 920,
+  },
+  story_snap: {
+    id: 'story_snap',
+    label: 'Story Snap',
+    profilePrompt:
+      [
+        'Style profile: story_snap.',
+        '[moment] [turning point] [lesson].',
+      ].join(' '),
+    minOutputChars: 110,
+    minParagraphs: 3,
+    maxParagraphs: 6,
+    maxOutputChars: 860,
+  },
+  relatable: {
+    id: 'relatable',
+    label: 'Relatable',
+    profilePrompt:
+      [
+        'Style profile: relatable.',
+        '[struggle] [honesty] [question].',
+      ].join(' '),
+    minOutputChars: 95,
+    minParagraphs: 2,
+    maxParagraphs: 5,
+    maxOutputChars: 760,
+  },
+  signal_flex: {
+    id: 'signal_flex',
+    label: 'Signal Flex',
+    profilePrompt:
+      [
+        'Style profile: signal_flex.',
+        '[result] [how it happened] [implication].',
+      ].join(' '),
+    minOutputChars: 110,
+    minParagraphs: 3,
+    maxParagraphs: 6,
+    maxOutputChars: 900,
   },
 };
 
@@ -217,7 +305,7 @@ const PROFILE_FEW_SHOT_EXAMPLES: Record<
     {
       source:
         [
-          'we tested a growth workflow and it worked.',
+          'we ran a growth workflow and it worked.',
           '',
           'how it works:',
           '1) qualify users',
@@ -226,7 +314,7 @@ const PROFILE_FEW_SHOT_EXAMPLES: Record<
         ].join('\n'),
       target:
         [
-          'Tested one growth workflow and kept the winning version.',
+          'Ran one growth workflow and kept the winning version.',
           '',
           'Qualified traffic first.',
           '',
@@ -238,7 +326,29 @@ const PROFILE_FEW_SHOT_EXAMPLES: Record<
         ].join('\n'),
     },
   ],
-  community: [
+  builder_in_public: [
+    {
+      source:
+        [
+          'Built a small internal workflow to speed up launch QA.',
+          '',
+          'It reduced time and gave us fewer regressions.',
+          '',
+          'Next we want to automate reporting.',
+        ].join('\n'),
+      target:
+        [
+          'built a lightweight qa workflow before each launch.',
+          '',
+          'qa time dropped by 41%. regressions dropped too.',
+          '',
+          'lesson: boring systems compound.',
+          '',
+          'next: automate reporting.',
+        ].join('\n'),
+    },
+  ],
+  community_builder: [
     {
       source:
         [
@@ -255,6 +365,78 @@ const PROFILE_FEW_SHOT_EXAMPLES: Record<
           'Use it to share wins and blockers in real time.',
           '',
           'If you are building, join us there.',
+        ].join('\n'),
+    },
+  ],
+  thought_leader: [
+    {
+      source:
+        [
+          'People over-focus on tools and under-focus on positioning.',
+          '',
+          'The best distribution starts from a clear market narrative.',
+        ].join('\n'),
+      target:
+        [
+          'most teams don’t have a tooling problem.',
+          '',
+          'they have a positioning problem.',
+          '',
+          'if the market narrative is weak, distribution stays expensive.',
+        ].join('\n'),
+    },
+  ],
+  story_snap: [
+    {
+      source:
+        [
+          'I almost shipped the wrong thing last week.',
+          '',
+          'A customer call changed the roadmap in 20 minutes.',
+        ].join('\n'),
+      target:
+        [
+          'last week i was ready to ship the wrong thing.',
+          '',
+          'one customer call flipped the roadmap in 20 minutes.',
+          '',
+          'lesson: talk to users before polishing plans.',
+        ].join('\n'),
+    },
+  ],
+  relatable: [
+    {
+      source:
+        [
+          'I keep overcomplicating simple decisions.',
+          '',
+          'It slows execution and creates unnecessary stress.',
+        ].join('\n'),
+      target:
+        [
+          'i still overcomplicate simple decisions.',
+          '',
+          'it slows everything down.',
+          '',
+          'you ever catch yourself doing this too?',
+        ].join('\n'),
+    },
+  ],
+  signal_flex: [
+    {
+      source:
+        [
+          'Our product hit a meaningful result after a distribution change.',
+          '',
+          'We reworked first-session onboarding and messaging.',
+        ].join('\n'),
+      target:
+        [
+          'activation moved +18% after one distribution change.',
+          '',
+          'we rewrote first-session onboarding and messaging.',
+          '',
+          'small messaging shifts can unlock real growth.',
         ].join('\n'),
     },
   ],
@@ -322,8 +504,23 @@ function parseStyleProfile(value: unknown): WritingStyleProfile | null {
   if (value === 'value_operator') {
     return 'value_operator';
   }
-  if (value === 'community') {
-    return 'community';
+  if (value === 'builder_in_public') {
+    return 'builder_in_public';
+  }
+  if (value === 'community_builder' || value === 'community') {
+    return 'community_builder';
+  }
+  if (value === 'thought_leader') {
+    return 'thought_leader';
+  }
+  if (value === 'story_snap') {
+    return 'story_snap';
+  }
+  if (value === 'relatable') {
+    return 'relatable';
+  }
+  if (value === 'signal_flex') {
+    return 'signal_flex';
   }
   return null;
 }
@@ -336,41 +533,37 @@ function inferStyleProfileFromInstructions(
     return null;
   }
 
-  const crackedHints = [
-    'cracked',
-    'lower case',
-    'lowercase',
-    'operator mode',
-    'shorter',
-    'more concise',
-    'tighter',
-  ];
-  const valueHints = [
-    'value',
-    'playbook',
-    'framework',
-    'tactical',
-    'strategy',
-    'operators',
-    'informational',
-  ];
-  const communityHints = [
-    'community',
-    'friendly',
-    'warmer',
-    'relatable',
-    'human',
-    'conversational',
-  ];
-
-  if (crackedHints.some((hint) => normalized.includes(hint))) {
+  if (
+    /\b(cracked|lower ?case|lowercase|ultra concise|short sharp|punchy)\b/.test(
+      normalized,
+    )
+  ) {
     return 'cracked_engineer';
   }
-  if (communityHints.some((hint) => normalized.includes(hint))) {
-    return 'community';
-  }
-  if (valueHints.some((hint) => normalized.includes(hint))) {
+  if (
+    /\b(value|playbook|framework|tactical|operator|operators|informational)\b/.test(
+      normalized,
+    )
+  ) {
     return 'value_operator';
+  }
+  if (/\b(builder in public|build in public|wip|next step)\b/.test(normalized)) {
+    return 'builder_in_public';
+  }
+  if (/\b(community|friendly|shared mission|group)\b/.test(normalized)) {
+    return 'community_builder';
+  }
+  if (/\b(pov|thesis|thought leader|strong opinion)\b/.test(normalized)) {
+    return 'thought_leader';
+  }
+  if (/\b(story|moment|turning point|snap)\b/.test(normalized)) {
+    return 'story_snap';
+  }
+  if (/\b(relatable|honesty|struggle)\b/.test(normalized)) {
+    return 'relatable';
+  }
+  if (/\b(signal flex|result first|outcome first)\b/.test(normalized)) {
+    return 'signal_flex';
   }
 
   return null;
@@ -382,54 +575,78 @@ function inferStyleProfileFromSource(sourceText: string): WritingStyleProfile {
   const sourceLength = normalized.length;
 
   const metricsCount = (normalized.match(/\b\d+(?:\.\d+)?%?\b/g) || []).length;
-  const tacticalCount = (
-    lowered.match(
-      /\b(playbook|framework|checklist|template|system|process|tactical|strategy|operators?)\b/g,
-    ) || []
+  const bulletCount = (normalized.match(/(^|\n)\s*(?:[-*•→]+|\d+[.)])\s+/g) || []).length;
+  const questionCount = (normalized.match(/\?/g) || []).length;
+  const quoteCount = (normalized.match(/"/g) || []).length;
+  const ctaCount = (
+    lowered.match(/\b(reply|dm|comment|drop|what do you think|thoughts)\b/g) || []
   ).length;
-  const casualCount = (
-    lowered.match(
-      /\b(lol|lmao|ngl|idk|shipped|buildinpublic|vibe|wild|kinda|lowkey|highkey)\b/g,
-    ) || []
+  const buildCount = (
+    lowered.match(/\b(i built|we built|shipped|shipping|launch|launched)\b/g) || []
   ).length;
   const communityCount = (
-    lowered.match(
-      /\b(community|people|friends|together|we|you|your|us|helping|support)\b/g,
-    ) || []
+    lowered.match(/\b(community|builders|founders|creators|together|us|we)\b/g) || []
   ).length;
-  const emojiCount = (normalized.match(/[🎉🔥🚀✨💯😊😅👏🙏🛠️👀]/g) || []).length;
+  const struggleCount = (
+    lowered.match(/\b(struggle|stuck|mess|hard|difficult|burned out)\b/g) || []
+  ).length;
+  const povCount = (
+    lowered.match(/\b(i think|i believe|hot take|opinion|pov)\b/g) || []
+  ).length;
 
   const letters = normalized.replace(/[^A-Za-z]/g, '');
   const uppercaseCount = (letters.match(/[A-Z]/g) || []).length;
   const lowercaseRatio =
     letters.length > 0 ? (letters.length - uppercaseCount) / letters.length : 0.5;
 
-  let crackedScore = 0;
-  let valueScore = 0;
-  let communityScore = 0;
+  const score: Record<WritingStyleProfile, number> = {
+    cracked_engineer: 0,
+    value_operator: 0,
+    builder_in_public: 0,
+    community_builder: 0,
+    thought_leader: 0,
+    story_snap: 0,
+    relatable: 0,
+    signal_flex: 0,
+  };
 
-  crackedScore += casualCount * 2;
-  crackedScore += emojiCount > 0 ? 1 : 0;
-  crackedScore += lowercaseRatio > 0.72 ? 1 : 0;
-  crackedScore += sourceLength < 700 ? 1 : 0;
+  score.cracked_engineer += lowercaseRatio > 0.72 ? 2 : 0;
+  score.cracked_engineer += sourceLength < 520 ? 1 : 0;
+  score.cracked_engineer += buildCount > 0 ? 1 : 0;
 
-  valueScore += tacticalCount * 2;
-  valueScore += metricsCount >= 2 ? 2 : metricsCount > 0 ? 1 : 0;
-  valueScore += sourceLength > 700 ? 2 : 0;
-  valueScore += /(how it works|why this matters|the problem)/i.test(normalized)
+  score.value_operator += metricsCount > 0 ? 2 : 0;
+  score.value_operator += bulletCount >= 2 ? 3 : bulletCount > 0 ? 1 : 0;
+  score.value_operator += ctaCount > 0 ? 1 : 0;
+
+  score.builder_in_public += buildCount > 0 ? 2 : 0;
+  score.builder_in_public += metricsCount > 0 ? 1 : 0;
+  score.builder_in_public += /\b(next|roadmap|shipping next)\b/i.test(normalized) ? 1 : 0;
+
+  score.community_builder += communityCount > 2 ? 2 : communityCount > 0 ? 1 : 0;
+  score.community_builder += ctaCount > 0 ? 1 : 0;
+
+  score.thought_leader += povCount > 0 ? 2 : 0;
+  score.thought_leader += sourceLength > 550 ? 1 : 0;
+
+  score.story_snap += /\b(last week|today|yesterday|then|suddenly)\b/i.test(normalized)
+    ? 2
+    : 0;
+  score.story_snap += quoteCount >= 2 ? 1 : 0;
+
+  score.relatable += struggleCount > 0 ? 2 : 0;
+  score.relatable += questionCount > 0 ? 1 : 0;
+
+  score.signal_flex += metricsCount >= 2 ? 2 : 0;
+  score.signal_flex += /\b(result|grew|up|down|improved|increased)\b/i.test(normalized)
     ? 1
     : 0;
 
-  communityScore += communityCount > 6 ? 2 : communityCount > 2 ? 1 : 0;
-  communityScore += /(community|founders|builders|creators)/i.test(normalized) ? 1 : 0;
-
-  if (valueScore >= crackedScore && valueScore >= communityScore) {
-    return 'value_operator';
+  const ranked = Object.entries(score).sort((a, b) => b[1] - a[1]);
+  const top = ranked[0] as [string, number] | undefined;
+  if (!top || top[1] <= 0) {
+    return sourceLength > 600 ? 'value_operator' : 'builder_in_public';
   }
-  if (crackedScore >= communityScore) {
-    return 'cracked_engineer';
-  }
-  return 'community';
+  return top[0] as WritingStyleProfile;
 }
 
 function resolveStyleProfile(
@@ -454,33 +671,26 @@ function getStyleProfileConfig(profile: WritingStyleProfile): StyleProfileConfig
 }
 
 function getStructureBlueprint(profile: WritingStyleProfile): string {
-  if (profile === 'value_operator') {
-    return [
-      'Structure blueprint for value operator:',
-      '[Hook] first paragraph: one clear, specific claim or observation.',
-      '[Value] middle paragraphs: practical method, concrete specifics, and one metric or tangible outcome when available.',
-      '[CTA] final paragraph: one direct call-to-action.',
-      'Do not print bracket labels. Use plain text paragraphs only.',
-    ].join(' ');
+  switch (profile) {
+    case 'cracked_engineer':
+      return '[sharp insight] [specific proof] [implied lesson]';
+    case 'value_operator':
+      return '[bold claim] - point - point - point [punchline] [engagement question]';
+    case 'builder_in_public':
+      return '[what happened] [metric] [lesson] [next step]';
+    case 'community_builder':
+      return '[community statement] [specific group or win] [shared mission] [open CTA]';
+    case 'thought_leader':
+      return '[strong POV] [why it matters] [conclusion]';
+    case 'story_snap':
+      return '[moment] [turning point] [lesson]';
+    case 'relatable':
+      return '[struggle] [honesty] [question]';
+    case 'signal_flex':
+      return '[result] [how it happened] [implication]';
+    default:
+      return '[what happened] [metric] [lesson] [next step]';
   }
-
-  if (profile === 'cracked_engineer') {
-    return [
-      'Structure blueprint for cracked engineer:',
-      '[Hook] short opener.',
-      '[Build] what changed and why it matters.',
-      '[Close] concise final line.',
-      'Do not print bracket labels. Keep it punchy.',
-    ].join(' ');
-  }
-
-  return [
-    'Structure blueprint for community profile:',
-    '[Hook] relatable opener.',
-    '[Context] what happened and what was learned.',
-    '[Invite] warm, direct CTA.',
-    'Do not print bracket labels. Use plain text paragraphs only.',
-  ].join(' ');
 }
 
 function normalize(text: string): string {
@@ -639,16 +849,7 @@ function needsToneRetry(text: string): boolean {
     return false;
   }
 
-  const linkedinisms = [
-    /\b(excited|thrilled|grateful|humbled|honored|blessed|delighted)\b/,
-    /\b(i'd love|would love|so proud|super excited)\b/,
-    /\b(journey|incredible|amazing|game[- ]changer)\b/,
-    /\b(why this matters|how it works|the problem)\b/,
-    /\b(if you'?re .* this is for you)\b/,
-    /[🎉🔥🚀✨💯😊😅👏🙏]/,
-  ];
-
-  return linkedinisms.some((pattern) => pattern.test(normalized));
+  return detectBannedPhrases(normalized).length > 0;
 }
 
 function hasLinkedInStructure(text: string): boolean {
@@ -667,11 +868,43 @@ function hasLinkedInStructure(text: string): boolean {
   return patterns.some((pattern) => pattern.test(normalized));
 }
 
-function detectStyleViolations(text: string): string[] {
+function detectBannedPhrases(text: string): string[] {
+  const normalized = normalize(text).toLowerCase();
+  if (!normalized) {
+    return [];
+  }
+
+  const checks: Array<{ label: string; pattern: RegExp }> = [
+    { label: 'excited to share', pattern: /\bexcited to share\b/i },
+    { label: 'grateful', pattern: /\bgrateful\b/i },
+    { label: 'journey', pattern: /\bjourney\b/i },
+    { label: 'lessons learned', pattern: /\blessons learned\b/i },
+    { label: 'thrilled', pattern: /\bthrilled\b/i },
+    { label: 'game changer', pattern: /\bgame[- ]changer\b/i },
+    { label: 'how it works', pattern: /\bhow it works\b/i },
+    { label: 'why this matters', pattern: /\bwhy this matters\b/i },
+    { label: 'the problem', pattern: /\bthe problem\b/i },
+  ];
+
+  const found: string[] = [];
+  for (const check of checks) {
+    if (check.pattern.test(normalized)) {
+      found.push(check.label);
+    }
+  }
+  return found;
+}
+
+function detectStyleViolations(
+  text: string,
+  styleProfile: WritingStyleProfile,
+  mode: XMode,
+): string[] {
   const normalized = normalize(text);
   const violations: string[] = [];
 
-  if (needsToneRetry(normalized)) {
+  const bannedPhrases = detectBannedPhrases(normalized);
+  if (bannedPhrases.length) {
     violations.push('LinkedIn tone words or celebratory phrasing detected');
   }
   if (hasLinkedInStructure(normalized)) {
@@ -683,8 +916,12 @@ function detectStyleViolations(text: string): string[] {
   if (/(^|\s)#[\p{L}\p{N}_-]+/u.test(normalized)) {
     violations.push('Hashtag detected');
   }
-  if (/(^|\n)\s*(?:[-*•→]+|\d+[.)])\s+/u.test(normalized)) {
+  const hasBullets = /(^|\n)\s*(?:[-*•→]+|\d+[.)])\s+/u.test(normalized);
+  if (hasBullets && styleProfile !== 'value_operator') {
     violations.push('Bullet or numbered list marker detected');
+  }
+  if (mode === 'unverified' && hasBullets) {
+    violations.push('Unverified mode should avoid list formatting');
   }
   if (/(^|\n)\s*(?:how it works|why this matters|the problem)\s*:/i.test(normalized)) {
     violations.push('LinkedIn section-heading style detected');
@@ -751,10 +988,12 @@ function getDynamicMinOutputChars(
   const sourceLength = normalize(sourceText).length;
   const ratio =
     profileConfig.id === 'cracked_engineer'
-      ? 0.3
-      : profileConfig.id === 'community'
-        ? 0.36
-        : 0.44;
+      ? 0.28
+      : profileConfig.id === 'relatable' || profileConfig.id === 'story_snap'
+        ? 0.3
+        : profileConfig.id === 'community_builder'
+          ? 0.34
+          : 0.4;
 
   const estimated = Math.round(sourceLength * ratio);
   return Math.min(
@@ -796,6 +1035,29 @@ function getFirstSentence(text: string): string {
   return normalize((sentenceEndMatch?.[1] ?? normalized).trim());
 }
 
+const UNVERIFIED_TRIGGER_PATTERN =
+  /\b(comment|called out|linkedin(?:-coded| formatted)?|noticed|saw|post(?:ed)? on x|culture|problem|almost didn'?t read)\b/i;
+const UNVERIFIED_BUILD_PATTERN =
+  /\b(i|we)\s+(built|made|shipped|launched)\b|\b(chrome extension|extension|translator|tool)\b/i;
+
+function splitXParagraphLines(text: string): string[] {
+  return normalize(text)
+    .split(/\n{2,}/g)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function getUnverifiedTriggerBuildIndices(text: string): {
+  triggerIndex: number;
+  buildIndex: number;
+} {
+  const lines = splitXParagraphLines(text);
+  return {
+    triggerIndex: lines.findIndex((line) => UNVERIFIED_TRIGGER_PATTERN.test(line)),
+    buildIndex: lines.findIndex((line) => UNVERIFIED_BUILD_PATTERN.test(line)),
+  };
+}
+
 function inferBuildAnchor(sourceText: string): string | null {
   const normalized = normalize(sourceText).toLowerCase();
   if (!normalized) {
@@ -817,6 +1079,204 @@ function inferBuildAnchor(sourceText: string): string | null {
   }
 
   return null;
+}
+
+function inferPostedActor(sourceText: string): string | null {
+  const normalized = normalize(sourceText);
+  if (!normalized) {
+    return null;
+  }
+
+  const match = normalized.match(/\b([A-Z][a-z]{2,})\s+posted on\s+X\b/i);
+  if (!match?.[1]) {
+    return null;
+  }
+  return match[1];
+}
+
+function inferPostedOnXLine(sourceText: string): string | null {
+  const lines = normalize(sourceText)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const line = lines.find((candidate) => /\bposted on\s+X\b/i.test(candidate));
+  if (!line) {
+    return null;
+  }
+
+  const compact = line
+    .replace(/\band how (she|he|they)\s+hired\b/gi, 'and hired')
+    .replace(/\bfrom it\b/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return compact;
+}
+
+function inferTriggerQuote(sourceText: string): string | null {
+  const normalized = normalize(sourceText);
+  if (!normalized) {
+    return null;
+  }
+
+  const quoteMatches = [...normalized.matchAll(/"([^"\n]{10,180})"/g)]
+    .map((match) => normalize(match[1] || '').trim())
+    .filter(Boolean);
+  if (!quoteMatches.length) {
+    return null;
+  }
+
+  const preferred =
+    quoteMatches.find((quote) => /almost didn'?t read/i.test(quote)) ||
+    quoteMatches.find((quote) => /linkedin(?:-coded| formatted)/i.test(quote)) ||
+    quoteMatches[0];
+  if (!preferred) {
+    return null;
+  }
+
+  return preferred.replace(/\s{2,}/g, ' ').trim();
+}
+
+function inferTriggerObservationLine(sourceText: string): string | null {
+  const lines = normalize(sourceText)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const triggerLine = lines.find((candidate) =>
+    /\b(comment|reply|linkedin(?:-coded| formatted)?|almost didn'?t read|called.*linkedin)\b/i.test(
+      candidate,
+    ),
+  );
+  if (!triggerLine) {
+    return null;
+  }
+  return triggerLine.replace(/\s{2,}/g, ' ').trim();
+}
+
+function inferBuildLine(sourceText: string): string | null {
+  const lines = normalize(sourceText)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const buildLine = lines.find((candidate) =>
+    /\b(?:i|we)\s+(?:built|made|shipped|launched)\b|\b(chrome extension|extension|translator|tool)\b/i.test(
+      candidate,
+    ),
+  );
+  if (buildLine) {
+    return buildLine.replace(/\s{2,}/g, ' ').trim();
+  }
+
+  const anchor = inferBuildAnchor(sourceText);
+  if (anchor) {
+    return `built ${anchor}.`;
+  }
+
+  return null;
+}
+
+function inferPurposeLine(sourceText: string): string | null {
+  const lines = normalize(sourceText)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const purposeLine = lines.find((candidate) =>
+    /\b(x-native|translate|rewrit(?:e|es|ing)|drafts?\s+an?\s+x\s+version|tailored for x|cross-post|format for x)\b/i.test(
+      candidate,
+    ),
+  );
+  if (!purposeLine) {
+    return null;
+  }
+
+  return purposeLine.replace(/\s{2,}/g, ' ').trim();
+}
+
+function normalizeSentenceEnding(text: string): string {
+  const normalizedText = normalize(text).trim();
+  if (!normalizedText) {
+    return '';
+  }
+  if (/[.!?]["'”’]?$/.test(normalizedText)) {
+    return normalizedText;
+  }
+  return `${normalizedText}.`;
+}
+
+function lowerCaseFirstAscii(text: string): string {
+  const normalizedText = normalize(text).trim();
+  if (!normalizedText) {
+    return '';
+  }
+  return normalizedText.charAt(0).toLowerCase() + normalizedText.slice(1);
+}
+
+function buildDeterministicUnverifiedDraft(
+  sourceText: string,
+  hardLimit: number,
+  lowercaseOnly: boolean,
+): string {
+  const source = normalize(sourceText);
+  if (!source) {
+    return '';
+  }
+
+  const actorLine = inferPostedOnXLine(sourceText);
+  const triggerQuote = inferTriggerQuote(sourceText);
+  const triggerObservation = inferTriggerObservationLine(sourceText);
+  const triggerLine = triggerQuote
+    ? normalizeSentenceEnding(
+        triggerObservation
+          ? `${triggerObservation} "${triggerQuote}"`
+          : `"${triggerQuote}"`,
+      )
+    : normalizeSentenceEnding(triggerObservation || '');
+  const buildLine = inferBuildLine(sourceText);
+  const purposeLine = inferPurposeLine(sourceText);
+
+  const leadLine = buildLine
+    ? normalizeSentenceEnding(
+        purposeLine
+          ? `${buildLine.replace(/[.!?]+$/, '')}. ${lowerCaseFirstAscii(purposeLine)}`
+          : buildLine,
+      )
+    : normalizeSentenceEnding(purposeLine || '');
+  const evidenceLine = actorLine && triggerLine
+    ? normalizeSentenceEnding(
+        `${actorLine.replace(/[.!?]+$/, '')}, but ${lowerCaseFirstAscii(
+          triggerLine.replace(/[.!?]+$/, ''),
+        )}`,
+      )
+    : normalizeSentenceEnding(triggerLine || actorLine || '');
+
+  const lines = [leadLine, evidenceLine]
+    .map((line) => normalize(line || '').replace(/\s{2,}/g, ' ').trim())
+    .filter(Boolean)
+    .filter((line, index, list) => list.indexOf(line) === index);
+  if (!lines.length) {
+    return '';
+  }
+
+  let draft = normalize(lines.join('\n\n'));
+  if (draft.length > hardLimit) {
+    const compactLead = normalizeSentenceEnding(buildLine || purposeLine || '');
+    const compactEvidence = normalizeSentenceEnding(
+      triggerQuote ? `"${triggerQuote}"` : triggerObservation || actorLine || '',
+    );
+    const compactDraft = normalize([compactLead, compactEvidence].filter(Boolean).join('\n\n'));
+    if (compactDraft && compactDraft.length < draft.length) {
+      draft = compactDraft;
+    }
+  }
+  if (!draft.trim()) {
+    draft = getFirstSentence(sourceText);
+  }
+  if (draft.length > hardLimit) {
+    draft = truncateAtNaturalBoundary(draft, hardLimit);
+  }
+
+  return applyCasePreference(draft, lowercaseOnly);
 }
 
 function pickAnchorKeyword(anchor: string): string {
@@ -945,31 +1405,169 @@ function detectNarrativeViolations(
   }
 
   if (xCharacterLimit <= X_STANDARD_CHAR_LIMIT) {
+    const sourceParagraphCount = source
+      .split(/\n{2,}/g)
+      .map((chunk) => chunk.trim())
+      .filter(Boolean).length;
     if (paragraphCount > 4) {
       violations.push('Unverified mode should stay compact with fewer paragraphs');
     }
+    if (sourceParagraphCount >= 3 && paragraphCount < 2 && output.length > 120) {
+      violations.push('Unverified mode should keep short line breaks, not a single dense line');
+    }
 
-    if (/"[^"\n]{10,}"/.test(output)) {
-      violations.push('Unverified mode should avoid quoted examples');
+    const sourceHasMeaningfulQuote = /"[^"\n]{10,}"/.test(source);
+    if (/"[^"\n]{10,}"/.test(output) && !sourceHasMeaningfulQuote) {
+      violations.push('Unverified mode should avoid invented quoted examples');
     }
 
     if (/\b(one reply stood out|for example|for instance)\b/i.test(output)) {
       violations.push('Unverified mode should avoid examples and setup lines');
     }
 
+    if (/\bmade me build\b/i.test(output)) {
+      violations.push(
+        'Unverified mode should avoid meta opener "made me build"; lead with trigger facts',
+      );
+    }
+
+    if (/\bnow\s+(my|this)\s+(extension|tool)\b/i.test(output)) {
+      violations.push('Unverified mode should avoid "now my extension" framing');
+    }
+
+    if (/(^|\n\n)\s*(someone|people|users)\b/i.test(output)) {
+      violations.push('Unverified mode should avoid vague subject lines');
+    }
+
+    if (/^\s*(tired of|ever |what if|are you|do you)\b/i.test(output)) {
+      violations.push('Unverified mode should avoid generic rhetorical hook openers');
+    }
+
+    if (/\b\d+\b/.test(source) && !/\b\d+\b/.test(output)) {
+      violations.push('Unverified mode should keep one concrete numeric fact');
+    }
+
+    const sourceMentionsLinkedInCoded = /\blinkedin(?:-coded| formatted)\b/i.test(source);
+    if (
+      sourceMentionsLinkedInCoded &&
+      !/\blinkedin(?:-coded| formatted)\b/i.test(output)
+    ) {
+      violations.push('Unverified mode should preserve the linkedin-coded trigger');
+    }
+
+    if (/almost didn'?t read/i.test(source) && !/almost didn'?t read/i.test(output)) {
+      violations.push('Unverified mode should preserve the "almost didn’t read" trigger');
+    }
+
+    const postedActor = inferPostedActor(sourceText);
+    if (postedActor && !new RegExp(`\\b${escapeRegExp(postedActor)}\\b`, 'i').test(output)) {
+      violations.push('Unverified mode should keep the named actor for specificity');
+    }
+
     const buildAnchor = inferBuildAnchor(source);
     if (buildAnchor) {
       const keyword = pickAnchorKeyword(buildAnchor);
-      const firstSentence = getFirstSentence(output).toLowerCase();
-      if (keyword && !firstSentence.includes(keyword)) {
+      const firstTwoLines = output
+        .split(/\n{2,}/g)
+        .slice(0, 2)
+        .join(' ')
+        .toLowerCase();
+      if (keyword && !firstTwoLines.includes(keyword)) {
         violations.push(
-          `First sentence must state what was built (missing: ${keyword})`,
+          `What was built should appear in the first two lines (missing: ${keyword})`,
         );
       }
+    }
+
+    const { triggerIndex, buildIndex } = getUnverifiedTriggerBuildIndices(output);
+    if (triggerIndex >= 0 && buildIndex >= 0 && triggerIndex < buildIndex) {
+      violations.push('For unverified mode, put what was built before trigger/observation');
     }
   }
 
   return violations;
+}
+
+function detectUnsupportedClaims(sourceText: string, outputText: string): string[] {
+  const source = normalize(sourceText).toLowerCase();
+  const output = normalize(outputText).toLowerCase();
+  if (!source || !output) {
+    return [];
+  }
+
+  const checks: Array<{ label: string; outputPattern: RegExp; sourcePattern: RegExp }> = [
+    {
+      label: 'test/experiment claim not present in source',
+      outputPattern: /\b(tested|test|experiment|pilot|validated|validation|case study)\b/i,
+      sourcePattern: /\b(tested|test|experiment|pilot|validated|validation|case study)\b/i,
+    },
+    {
+      label: 'launch timing claim not present in source',
+      outputPattern: /\b(launched today|just launched|went live today)\b/i,
+      sourcePattern: /\b(launched today|just launched|went live today)\b/i,
+    },
+  ];
+
+  const violations: string[] = [];
+  for (const check of checks) {
+    if (check.outputPattern.test(output) && !check.sourcePattern.test(source)) {
+      violations.push(check.label);
+    }
+  }
+
+  return violations;
+}
+
+function detectRewriteSimilarityViolation(
+  currentPostText: string,
+  outputText: string,
+  isRewriteContext: boolean,
+): string[] {
+  if (!isRewriteContext) {
+    return [];
+  }
+
+  const current = normalize(currentPostText);
+  const output = normalize(outputText);
+  if (!current || !output) {
+    return [];
+  }
+
+  if (current.toLowerCase() === output.toLowerCase()) {
+    return ['Rewrite output is identical to current post'];
+  }
+
+  const tokenDistance = computeTokenDistance(current, output);
+  if (tokenDistance < 0.16) {
+    return ['Rewrite output is too similar to current post'];
+  }
+
+  return [];
+}
+
+function enforceSourceClaimGuard(sourceText: string, outputText: string): string {
+  const source = normalize(sourceText).toLowerCase();
+  const output = normalize(outputText);
+  if (!source || !output) {
+    return output;
+  }
+
+  const sourceHasTestClaims =
+    /\b(tested|test|experiment|pilot|validated|validation|case study)\b/i.test(source);
+  if (sourceHasTestClaims) {
+    return output;
+  }
+
+  const lines = output
+    .split(/\n{2,}/g)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter(
+      (line) =>
+        !/\b(tested|test|experiment|pilot|validated|validation|case study)\b/i.test(line),
+    );
+
+  return normalize(lines.join('\n\n'));
 }
 
 function truncateAtNaturalBoundary(text: string, maxChars: number): string {
@@ -1033,7 +1631,7 @@ function enforceOutputShape(text: string, maxChars = MAX_X_OUTPUT_CHARS): string
     output = nonEmptyLines.join('\n\n');
   } else {
     const sentenceChunks = output
-      .split(/(?<=[.!?])\s+(?=[A-Z0-9"'])/g)
+      .split(/(?<=[.!?])\s+(?=[A-Za-z0-9"'])/g)
       .map((chunk) => chunk.trim())
       .filter(Boolean);
     if (sentenceChunks.length > 1) {
@@ -1041,15 +1639,261 @@ function enforceOutputShape(text: string, maxChars = MAX_X_OUTPUT_CHARS): string
     }
   }
 
+  output = normalizeDashCharacters(output);
+  output = normalizePunctuationSpacing(output);
   return truncateAtNaturalBoundary(output, maxChars);
+}
+
+function normalizeDashCharacters(text: string): string {
+  let output = normalize(text);
+  // Strip typographic dashes to avoid LinkedIn-style punctuation in X output.
+  output = output.replace(/\s*[—–]+\s*/g, ' - ');
+  output = output.replace(/[ \t]{2,}/g, ' ');
+  return normalize(output);
+}
+
+function normalizePunctuationSpacing(text: string): string {
+  let output = normalize(text);
+  output = output.replace(/\s+([,.;!?])/g, '$1');
+  output = output.replace(/\s+([)\]}])/g, '$1');
+  output = output.replace(/([([{])\s+/g, '$1');
+  output = output.replace(/([.!?]["'”’])\s*[.!?]+/g, '$1');
+  output = output.replace(/([.!?])\s+([,.;!?])/g, '$1');
+  return normalize(output);
+}
+
+function normalizeSentenceCapitalization(text: string): string {
+  const normalizedText = normalize(text);
+  if (!normalizedText) {
+    return '';
+  }
+
+  const chars = [...normalizedText];
+  let capitalizeNext = true;
+
+  for (let index = 0; index < chars.length; index += 1) {
+    const char = chars[index];
+
+    if (capitalizeNext && /[a-z]/.test(char)) {
+      chars[index] = char.toUpperCase();
+      capitalizeNext = false;
+      continue;
+    }
+
+    if (/[A-Za-z]/.test(char)) {
+      capitalizeNext = false;
+      continue;
+    }
+
+    if (char === '\n' || char === '!' || char === '?' || char === '.') {
+      capitalizeNext = true;
+    }
+  }
+
+  return chars.join('').replace(/\bi\b/g, 'I');
 }
 
 function applyCasePreference(text: string, lowercaseOnly: boolean): string {
   const normalized = normalize(text);
   if (!lowercaseOnly) {
-    return normalized;
+    return normalizeSentenceCapitalization(normalized);
   }
   return normalized.toLowerCase();
+}
+
+function toModeFromLimit(xCharacterLimit: number): XMode {
+  return xCharacterLimit <= X_STANDARD_CHAR_LIMIT ? 'unverified' : 'verified';
+}
+
+function trimToSingleInsightForUnverified(text: string, hardLimit: number): string {
+  const normalized = normalize(text);
+  if (!normalized) {
+    return '';
+  }
+
+  const lines = normalized
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) {
+    return '';
+  }
+
+  const triggerIndex = lines.findIndex((line) => UNVERIFIED_TRIGGER_PATTERN.test(line));
+  const buildIndex = lines.findIndex((line) => UNVERIFIED_BUILD_PATTERN.test(line));
+
+  const prioritized: string[] = [];
+  if (buildIndex >= 0 && buildIndex !== triggerIndex) {
+    prioritized.push(lines[buildIndex]);
+  }
+  if (triggerIndex >= 0) {
+    prioritized.push(lines[triggerIndex]);
+  }
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (prioritized.includes(line)) {
+      continue;
+    }
+    prioritized.push(line);
+  }
+
+  const compactTarget = Math.min(240, hardLimit);
+  let working = prioritized.slice(0, 3);
+  let current = working.join('\n\n');
+
+  while (working.length > 2 && current.length > compactTarget) {
+    working.pop();
+    current = working.join('\n\n');
+  }
+
+  while (working.length > 2 && current.length > hardLimit) {
+    working.pop();
+    current = working.join('\n\n');
+  }
+
+  if (current.length > hardLimit && working.length > 1) {
+    const twoLine = working.slice(0, 2).join('\n\n');
+    if (twoLine.length <= hardLimit) {
+      current = twoLine;
+    }
+  }
+
+  if (current.length > hardLimit) {
+    current = truncateAtNaturalBoundary(current, hardLimit);
+  }
+
+  return normalize(current);
+}
+
+function reorderUnverifiedBuildBeforeTrigger(text: string): string {
+  const lines = splitXParagraphLines(text);
+  if (lines.length < 2) {
+    return normalize(text);
+  }
+
+  const triggerIndex = lines.findIndex((line) => UNVERIFIED_TRIGGER_PATTERN.test(line));
+  const buildIndex = lines.findIndex((line) => UNVERIFIED_BUILD_PATTERN.test(line));
+
+  if (
+    triggerIndex < 0 ||
+    buildIndex < 0 ||
+    triggerIndex === buildIndex ||
+    buildIndex < triggerIndex
+  ) {
+    return normalize(lines.join('\n\n'));
+  }
+
+  const reordered = [
+    lines[buildIndex],
+    lines[triggerIndex],
+    ...lines.filter((_, index) => index !== triggerIndex && index !== buildIndex),
+  ];
+  return normalize(reordered.join('\n\n'));
+}
+
+function sanitizeXOutputText(
+  text: string,
+  mode: XMode,
+  xCharacterLimit: number,
+  styleProfile: WritingStyleProfile,
+  lowercaseOnly: boolean,
+): string {
+  let output = enforceOutputShape(text, xCharacterLimit);
+  output = output.replace(/[ \t]{2,}/g, ' ').trim();
+
+  if (styleProfile !== 'value_operator' || mode === 'unverified') {
+    output = output
+      .split('\n')
+      .map((line) => line.replace(/^\s*(?:[-*•→]+|\d+[.)])\s+/g, '').trim())
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  output = output.replace(/(^|\s)#[\p{L}\p{N}_-]+/gu, '$1').trim();
+  output = applyCasePreference(output, lowercaseOnly);
+  output = normalizePunctuationSpacing(output);
+
+  if (mode === 'unverified') {
+    output = reorderUnverifiedBuildBeforeTrigger(output);
+    output = trimToSingleInsightForUnverified(output, xCharacterLimit);
+    if (output.length > xCharacterLimit) {
+      output = truncateAtNaturalBoundary(output, xCharacterLimit);
+    }
+  }
+
+  if (output.length > xCharacterLimit) {
+    output = truncateAtNaturalBoundary(output, xCharacterLimit);
+  }
+
+  return normalize(output);
+}
+
+function stripCodeFence(text: string): string {
+  const normalized = normalize(text).trim();
+  if (!normalized) {
+    return '';
+  }
+  return normalized.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+}
+
+function parseLlmTransformOutput(raw: string): LlmTransformOutput | null {
+  const cleaned = stripCodeFence(raw);
+  const candidates = [cleaned];
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(cleaned.slice(firstBrace, lastBrace + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as Partial<LlmTransformOutput>;
+      if (!parsed || typeof parsed !== 'object') {
+        continue;
+      }
+      if (typeof parsed.x_post !== 'string') {
+        continue;
+      }
+
+      const mode = parsed.mode === 'verified' ? 'verified' : 'unverified';
+      const archetype = parseStyleProfile(parsed.archetype) ?? null;
+      if (!archetype) {
+        continue;
+      }
+
+      const bannedPhrasesFound = Array.isArray(parsed.banned_phrases_found)
+        ? parsed.banned_phrases_found
+            .filter((item): item is string => typeof item === 'string')
+            .map((item) => normalize(item).trim())
+            .filter(Boolean)
+        : [];
+      const editNotes = Array.isArray(parsed.edit_notes)
+        ? parsed.edit_notes
+            .filter((item): item is string => typeof item === 'string')
+            .map((item) => normalize(item).trim())
+            .filter(Boolean)
+        : [];
+
+      return {
+        x_post: normalize(parsed.x_post),
+        char_count:
+          typeof parsed.char_count === 'number' && Number.isFinite(parsed.char_count)
+            ? Math.max(0, Math.floor(parsed.char_count))
+            : normalize(parsed.x_post).length,
+        mode,
+        archetype,
+        structure_used:
+          typeof parsed.structure_used === 'string'
+            ? normalize(parsed.structure_used).trim()
+            : getStructureBlueprint(archetype),
+        banned_phrases_found: bannedPhrasesFound,
+        edit_notes: editNotes,
+      };
+    } catch {
+      // continue
+    }
+  }
+  return null;
 }
 
 async function callGroq(
@@ -1121,244 +1965,256 @@ async function callGroq(
 async function extractFactsWithGroq(sourceText: string): Promise<string> {
   const heuristicFacts = extractFactCandidates(sourceText);
   const heuristicFactsBlock = formatFactsBlock(heuristicFacts);
-
-  if (!GROQ_API_KEY) {
-    return heuristicFactsBlock || normalize(sourceText);
-  }
-
-  try {
-    const extracted = await callGroq([
-      {
-        role: 'system',
-        content:
-          [
-            'Extract hard facts from a LinkedIn draft.',
-            'Return plain text only.',
-            'One fact per line.',
-            `Max ${MAX_FACT_LINES} lines.`,
-            'No bullets, no numbering, no hashtags, no emojis.',
-            'No tone, no hype, no commentary.',
-            'Keep specific names, numbers, and quoted lines if present.',
-          ].join(' '),
-      },
-      {
-        role: 'user',
-        content: sourceText,
-      },
-    ]);
-
-    const cleaned = extractFactCandidates(extracted);
-    if (cleaned.length) {
-      return formatFactsBlock(cleaned);
-    }
-  } catch {
-    // Fall back to heuristic extraction.
-  }
-
   return heuristicFactsBlock || normalize(sourceText);
 }
 
 async function generateXDraftWithGroq(
   sourceText: string,
+  referenceText: string,
   rewriteInstructions: string,
   styleProfile: WritingStyleProfile,
   isXVerified: boolean,
   xCharacterLimit: number,
   lowercaseOnly: boolean,
 ): Promise<string> {
-  const profileConfig = getStyleProfileConfig(styleProfile);
-  const isCompactUnverifiedMode = xCharacterLimit <= X_STANDARD_CHAR_LIMIT;
+  const currentPostText = normalize(sourceText);
+  const groundingText = normalize(referenceText) || currentPostText;
+  const isRewriteContext = currentPostText !== groundingText;
+  const effectiveRewriteInstructions = rewriteInstructions.trim()
+    ? rewriteInstructions
+    : isRewriteContext
+      ? 'Do a complete rewrite of current_post_text with fresh wording and structure. Keep facts grounded in original_linkedin_text. Do not return a near-duplicate of current_post_text.'
+      : '';
+  const mode: XMode = isXVerified ? 'verified' : 'unverified';
   const effectiveMaxOutputChars = Math.max(
-    120,
+    mode === 'unverified' ? 120 : 320,
     Math.min(xCharacterLimit, X_VERIFIED_CHAR_LIMIT),
   );
-  let minOutputChars = Math.max(
-    80,
-    Math.min(
-      getDynamicMinOutputChars(sourceText, profileConfig),
-      Math.max(100, effectiveMaxOutputChars - 40),
-    ),
-  );
-  let paragraphBounds = getDynamicParagraphBounds(sourceText, profileConfig);
-  let maxOutputTokens = Math.max(
-    180,
-    Math.min(2000, Math.ceil(effectiveMaxOutputChars / 3.2)),
-  );
-
-  if (isCompactUnverifiedMode) {
-    minOutputChars = Math.max(90, Math.min(170, minOutputChars));
-    paragraphBounds = { min: 1, max: 4 };
-    maxOutputTokens = Math.min(maxOutputTokens, 240);
-  }
+  const profileHint = getStyleProfileConfig(styleProfile);
+  const fewShotMessages = getFewShotMessages(styleProfile);
+  const factsBlock = await extractFactsWithGroq(groundingText);
+  const structureBlueprint = getStructureBlueprint(styleProfile);
+  const caseDirective = lowercaseOnly
+    ? 'Lowercase-only mode is ON. Force full lowercase in x_post.'
+    : 'Lowercase-only mode is OFF. Use normal capitalization unless archetype implies lowercase.';
 
   if (!GROQ_API_KEY) {
-    return createMockXDraft(
-      sourceText,
-      rewriteInstructions,
+    const mock = createMockXDraft(
+      currentPostText,
+      effectiveRewriteInstructions,
       styleProfile,
       effectiveMaxOutputChars,
     );
+    return sanitizeXOutputText(mock, mode, effectiveMaxOutputChars, styleProfile, lowercaseOnly);
   }
 
-  const factsBlock = await extractFactsWithGroq(sourceText);
-  const rewriteClause = rewriteInstructions
-    ? `User rewrite instructions (highest priority): ${rewriteInstructions}`
-    : 'No additional rewrite instructions were provided.';
-  const caseClause = lowercaseOnly
-    ? 'Capitalization mode: lowercase only. Output must be fully lowercase.'
-    : 'Capitalization mode: normal sentence capitalization. Do not force all-lowercase.';
-  const compactModeClause = isCompactUnverifiedMode
-    ? [
-        'Unverified compact mode is active.',
-        'In the first sentence, say exactly what was built.',
-        'Remove setup, examples, and quoted replies.',
-        'No fluff, no backstory, no motivational framing.',
-        'Prefer 2-4 short sentences total.',
-      ].join(' ')
-    : 'Standard compactness mode.';
-  const structureBlueprintClause = getStructureBlueprint(styleProfile);
-  const strictFormatClause =
-    [
-      'Strict output format:',
-      'Plain text only.',
-      'No hashtags and no emojis.',
-      'No bullets, numbered lists, or markdown markers.',
-      `Use ${paragraphBounds.min}-${paragraphBounds.max} short paragraphs.`,
-      'Each paragraph should be 1-2 sentences.',
-      'Put a blank line between paragraphs.',
-      `Target ${minOutputChars}-${effectiveMaxOutputChars} chars.`,
-      'If close to the character limit, end early on a full sentence.',
-      'Keep it tight, but do not collapse into a dry summary.',
-    ].join(' ');
-  const styleGuardClause =
-    [
-      'Never use LinkedIn scaffolding phrases like "How it works",',
-      '"Why this matters", or "The problem".',
-      'Never use motivational or celebratory voice.',
-      `Account tier: ${isXVerified ? 'verified' : 'unverified'}.`,
-      `Hard cap: ${effectiveMaxOutputChars} characters. Never exceed it.`,
-    ].join(' ');
-  const profileClause = profileConfig.profilePrompt;
-  const narrativeArcClause =
-    [
-      'Keep a clear narrative arc:',
-      '1) hook',
-      '2) trigger or observation',
-      '3) core problem',
-      '4) what you built',
-      '5) why it matters.',
-      'Preserve concrete specifics from the source.',
-    ].join(' ');
-  const fewShotMessages = getFewShotMessages(styleProfile);
-  const importantAnchors = extractImportantAnchors(sourceText);
+  const archetypeList = [
+    'cracked_engineer',
+    'value_operator',
+    'builder_in_public',
+    'community_builder',
+    'thought_leader',
+    'story_snap',
+    'relatable',
+    'signal_flex',
+  ].join(' | ');
 
-  const primaryDraft = await callGroq([
-    {
-      role: 'system',
-      content:
-        [
-          'You convert LinkedIn drafts into X-native writing using facts-first transformation.',
-          'Tone target: serious, direct, stern, high-conviction.',
-          'Use short declarative sentences and active voice.',
-          'Start from the facts block. Keep intent and core facts. Remove LinkedIn framing.',
-          profileClause,
-          narrativeArcClause,
-          structureBlueprintClause,
-          styleGuardClause,
-          strictFormatClause,
-          caseClause,
-          compactModeClause,
-          'Do not compress this into generic statements.',
-          'Keep the concrete setup, observation, and what was built.',
-          `Keep output <= ${effectiveMaxOutputChars} characters.`,
-          rewriteClause,
-          'Return plain text only.',
-        ].join(' '),
-    },
-    ...fewShotMessages,
-    {
-      role: 'user',
-      content:
-        [
-          `FACTS:\n${factsBlock || '(none)'}`,
-          `MUST_KEEP_SPECIFICS:\n${
-            importantAnchors.length ? importantAnchors.join('\n') : '(none)'
-          }`,
-          `ORIGINAL_DRAFT:\n${sourceText}`,
-          `REWRITE_INSTRUCTIONS:\n${rewriteInstructions || '(none)'}`,
-        ].join('\n\n'),
-    },
-  ], {
-    maxTokens: maxOutputTokens,
-  });
+  const systemPrompt = [
+    'You are an expert X (Twitter) native writer and cultural adapter.',
+    'Your job is NOT to summarize LinkedIn posts.',
+    'Your job is to transform long-form LinkedIn content into X-native posts that match platform culture and posting limits.',
+    'Pipeline (must follow in order):',
+    'Step 1 Infer Intent: classify into exactly one archetype.',
+    `Allowed archetypes: ${archetypeList}.`,
+    'Step 2 Apply Archetype Structure using exact structure blocks.',
+    'cracked_engineer: all lowercase, 2-5 short lines, [sharp insight] [specific proof] [implied lesson].',
+    'value_operator: [bold claim] - point - point - point [punchline] [engagement question].',
+    'builder_in_public: [what happened] [metric] [lesson] [next step].',
+    'community_builder: [community statement] [specific group or win] [shared mission] [open CTA].',
+    'thought_leader: [strong POV] [why it matters] [conclusion].',
+    'story_snap: [moment] [turning point] [lesson].',
+    'relatable: [struggle] [honesty] [question].',
+    'signal_flex: [result] [how it happened] [implication].',
+    'Step 3 Length Mode:',
+    'mode unverified: MUST be <= 280 chars, target <= 240, ultra concise, one main insight only.',
+    'For unverified, prefer two-part causal flow: line 1 what you built/solution, line 2 trigger evidence.',
+    'If trigger and build both exist, do build first, then trigger.',
+    'Avoid long setup before saying what was built.',
+    'Do not use opener pattern "I saw a comment that made me build...".',
+    'Avoid "Now my extension..." framing.',
+    'For unverified, preserve one concrete specific from source (named actor and/or number when present).',
+    'Avoid vague openers like "someone", "people", or "users" when source provides specifics.',
+    'mode verified: may exceed 280 chars, allow more bullets and depth but still X-native.',
+    'When both original_linkedin_text and current_post_text are present, treat current_post_text as rewrite base and original_linkedin_text as facts authority.',
+    'Step 4 Cultural Constraints (always enforce):',
+    'Factuality is non-negotiable: never invent events, tests, experiments, launch claims, outcomes, or usage claims not present in linkedin_text.',
+    'Do not use words like tested, experiment, validated, pilot unless the source explicitly contains that claim.',
+    'No corporate language. No LinkedIn phrases. No hashtags. No motivational fluff.',
+    'Do not use em dashes or en dashes.',
+    'Avoid: excited to share, grateful, journey, lessons learned, thrilled, game changer.',
+    'Use short lines, sharp POV, one clear idea, native X voice.',
+    'Step 5 Compression Rules (if too long): delete backstory first, keep one metric/example, remove weakest line usually CTA, never remove main insight.',
+    'Output JSON only with this schema:',
+    '{ "x_post": "string", "char_count": number, "mode": "unverified | verified", "archetype": "...", "structure_used": "string", "banned_phrases_found": ["string"], "edit_notes": ["string"] }',
+    'Always compute accurate char_count from x_post.',
+    `Hard output cap: ${effectiveMaxOutputChars} chars for x_post.`,
+    caseDirective,
+    `Archetype hint from classifier: ${styleProfile}. Structure hint: ${structureBlueprint}.`,
+    `Profile hint details: ${profileHint.profilePrompt}`,
+    'Return valid JSON only. No markdown fences.',
+  ].join(' ');
 
-  let candidate = applyCasePreference(
-    enforceOutputShape(primaryDraft, effectiveMaxOutputChars),
-    lowercaseOnly,
-  );
+  const inputPayload = {
+    original_linkedin_text: groundingText,
+    current_post_text: currentPostText,
+    mode,
+  };
 
-  for (let attempt = 0; attempt < MAX_STYLE_RETRIES; attempt += 1) {
-    const violations = [
-      ...detectStyleViolations(candidate),
-      ...detectNarrativeViolations(
-        sourceText,
-        candidate,
-        styleProfile,
-        xCharacterLimit,
-      ),
-    ];
-    if (!violations.length) {
-      return candidate;
-    }
+  const userPrompt = [
+    'Input JSON:',
+    JSON.stringify(inputPayload, null, 2),
+    referenceText && normalize(referenceText) !== normalize(sourceText)
+      ? `Reference source (facts authority):\n${groundingText}`
+      : 'Reference source (facts authority):\n(same as input)',
+    `Facts to preserve:\n${factsBlock || '(none)'}`,
+    effectiveRewriteInstructions
+      ? `Additional rewrite instructions:\n${effectiveRewriteInstructions}`
+      : 'Additional rewrite instructions:\n(none)',
+    'Now transform the input.',
+  ].join('\n\n');
 
-    const retryDraft = await callGroq([
-      {
-        role: 'system',
-        content:
-          [
-            'You are fixing an X draft that still sounds LinkedIn-coded.',
-            'Rewrite with hard constraints and remove all listed violations.',
-            'Keep only core facts and intent.',
-            profileClause,
-            narrativeArcClause,
-            structureBlueprintClause,
-            styleGuardClause,
-            strictFormatClause,
-            caseClause,
-            compactModeClause,
-            rewriteClause,
-            `Keep output <= ${effectiveMaxOutputChars} characters.`,
-            'Return plain text only.',
-          ].join(' '),
-      },
-      ...fewShotMessages,
-      {
-        role: 'user',
-        content:
-          [
-            `FACTS:\n${factsBlock || '(none)'}`,
-            `MUST_KEEP_SPECIFICS:\n${
-              importantAnchors.length ? importantAnchors.join('\n') : '(none)'
-            }`,
-            `ORIGINAL_DRAFT:\n${sourceText}`,
-            `CURRENT_DRAFT_TO_FIX:\n${candidate}`,
-            `VIOLATIONS_TO_REMOVE:\n${violations
-              .map((item, index) => `${index + 1}. ${item}`)
-              .join('\n')}`,
-            `REWRITE_INSTRUCTIONS:\n${rewriteInstructions || '(none)'}`,
-          ].join('\n\n'),
-      },
-    ], {
+  const maxOutputTokens =
+    mode === 'unverified'
+      ? 260
+      : Math.min(2200, Math.max(500, Math.ceil(effectiveMaxOutputChars / 2.8)));
+
+  let bestCandidate = '';
+  let bestArchetype: WritingStyleProfile = styleProfile;
+  let lastViolations: string[] = [];
+
+  for (let attempt = 0; attempt < MAX_STYLE_RETRIES + 1; attempt += 1) {
+    const isRetry = attempt > 0;
+    const retryMessages: ChatMessage[] = isRetry
+      ? [
+          {
+            role: 'system',
+            content: systemPrompt,
+          },
+          ...fewShotMessages,
+          {
+            role: 'user',
+            content: [
+              userPrompt,
+              `Current candidate JSON:\n${bestCandidate || '(none)'}`,
+              `Violations to fix:\n${
+                lastViolations.length
+                  ? lastViolations.map((v, idx) => `${idx + 1}. ${v}`).join('\n')
+                  : '1. Return valid JSON with required schema.'
+              }`,
+              'Rewrite and return corrected JSON only.',
+            ].join('\n\n'),
+          },
+        ]
+      : [
+          {
+            role: 'system',
+            content: systemPrompt,
+          },
+          ...fewShotMessages,
+          {
+            role: 'user',
+            content: userPrompt,
+          },
+        ];
+
+    const raw = await callGroq(retryMessages, {
       maxTokens: maxOutputTokens,
     });
+    const parsed = parseLlmTransformOutput(raw);
+    if (!parsed) {
+      bestCandidate = raw;
+      lastViolations = ['Model output was not valid JSON'];
+      continue;
+    }
 
-    candidate = applyCasePreference(
-      enforceOutputShape(retryDraft, effectiveMaxOutputChars),
+    const parsedArchetype = parsed.archetype || styleProfile;
+    let sanitizedPost = sanitizeXOutputText(
+      parsed.x_post,
+      mode,
+      effectiveMaxOutputChars,
+      parsedArchetype,
       lowercaseOnly,
     );
+    sanitizedPost = enforceSourceClaimGuard(groundingText, sanitizedPost);
+    const bannedPhrasesFound = detectBannedPhrases(sanitizedPost);
+    const charCount = sanitizedPost.length;
+
+    const output: LlmTransformOutput = {
+      x_post: sanitizedPost,
+      char_count: charCount,
+      mode,
+      archetype: parsedArchetype,
+      structure_used: parsed.structure_used || getStructureBlueprint(parsedArchetype),
+      banned_phrases_found: bannedPhrasesFound,
+      edit_notes: parsed.edit_notes || [],
+    };
+
+    const violations = [
+      ...detectStyleViolations(output.x_post, output.archetype, mode),
+      ...detectNarrativeViolations(
+        groundingText,
+        output.x_post,
+        output.archetype,
+        effectiveMaxOutputChars,
+      ),
+      ...detectUnsupportedClaims(groundingText, output.x_post),
+      ...detectRewriteSimilarityViolation(currentPostText, output.x_post, isRewriteContext),
+    ];
+
+    if (mode === 'unverified' && output.char_count > X_STANDARD_CHAR_LIMIT) {
+      violations.push('Unverified output exceeded 280 characters');
+    }
+    if (mode === 'unverified' && output.char_count > 260 && !lowercaseOnly) {
+      violations.push('Unverified output exceeded compact target length');
+    }
+    if (mode === 'verified' && output.char_count > X_VERIFIED_CHAR_LIMIT) {
+      violations.push('Verified output exceeded 25k characters');
+    }
+    if (output.banned_phrases_found.length > 0) {
+      violations.push(
+        `Banned phrases found: ${output.banned_phrases_found.join(', ')}`,
+      );
+    }
+
+    bestCandidate = JSON.stringify(output);
+    bestArchetype = output.archetype;
+    lastViolations = violations;
+
+    if (!violations.length) {
+      return output.x_post;
+    }
   }
 
-  return candidate;
+  const fallbackRaw = parseLlmTransformOutput(bestCandidate)?.x_post || sourceText;
+  const fallback = sanitizeXOutputText(
+    fallbackRaw,
+    mode,
+    effectiveMaxOutputChars,
+    bestArchetype,
+    lowercaseOnly,
+  );
+  const guardedFallback = enforceSourceClaimGuard(groundingText, fallback);
+  if (mode === 'unverified') {
+    const deterministic = buildDeterministicUnverifiedDraft(
+      groundingText,
+      effectiveMaxOutputChars,
+      lowercaseOnly,
+    );
+    if (deterministic) {
+      return deterministic;
+    }
+  }
+  return guardedFallback;
 }
 
 function json(res: ServerResponse, statusCode: number, payload: XDraftResponse): void {
@@ -1433,6 +2289,10 @@ const server = createServer(async (req, res) => {
     const sourceText = sanitizeSourceText(
       typeof body.sourceText === 'string' ? body.sourceText : '',
     );
+    const referenceText = sanitizeSourceText(
+      typeof body.referenceText === 'string' ? body.referenceText : '',
+    );
+    const groundingText = referenceText.trim() ? referenceText : sourceText;
     const rewriteInstructions = sanitizeRewriteInstructions(
       typeof body.rewriteInstructions === 'string' ? body.rewriteInstructions : '',
     );
@@ -1446,7 +2306,7 @@ const server = createServer(async (req, res) => {
     const requestedStyleProfile = parseStyleProfile(body.styleProfile);
     const styleProfile = resolveStyleProfile(
       requestedStyleProfile,
-      sourceText,
+      groundingText,
       rewriteInstructions,
     );
     const force = Boolean(body.force);
@@ -1467,10 +2327,11 @@ const server = createServer(async (req, res) => {
       ? sha256(rewriteInstructions)
       : 'no-rewrite';
     const styleHash = sha256(styleProfile);
+    const groundingHash = sha256(groundingText);
     const limitHash = sha256(`${isXVerified ? 'verified' : 'unverified'}:${xCharacterLimit}`);
     const caseHash = sha256(lowercaseOnly ? 'lowercase_only' : 'normal_caps');
 
-    const cacheKey = `${threadId}:${sourceHash}:${rewriteHash}:${styleHash}:${limitHash}:${caseHash}`;
+    const cacheKey = `${threadId}:${sourceHash}:${groundingHash}:${rewriteHash}:${styleHash}:${limitHash}:${caseHash}:${GENERATION_PROMPT_VERSION}`;
     const cachedRecord = cacheByThreadAndHash.get(cacheKey);
     if (cachedRecord && !bypassHashCache) {
       json(res, 200, {
@@ -1484,7 +2345,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const latestKey = `${threadId}:${rewriteHash}:${styleHash}:${limitHash}:${caseHash}`;
+    const latestKey = `${threadId}:${groundingHash}:${rewriteHash}:${styleHash}:${limitHash}:${caseHash}:${GENERATION_PROMPT_VERSION}`;
     const lastRecord = latestByThreadAndRewrite.get(latestKey);
     if (
       !force &&
@@ -1504,6 +2365,7 @@ const server = createServer(async (req, res) => {
 
     const generatedXText = await generateXDraftWithGroq(
       sourceText,
+      groundingText,
       rewriteInstructions,
       styleProfile,
       isXVerified,
@@ -1519,6 +2381,7 @@ const server = createServer(async (req, res) => {
       threadId,
       sourceHash,
       sourceText,
+      referenceText: groundingText,
       styleProfile,
       isXVerified,
       xCharacterLimit,
@@ -1538,8 +2401,8 @@ const server = createServer(async (req, res) => {
       cached: false,
       skipped: false,
       reason: GROQ_API_KEY
-        ? `generated_with_groq:${styleProfile}:${xCharacterLimit}`
-        : `generated_mock_mode:${styleProfile}:${xCharacterLimit}`,
+        ? `generated_with_groq:${styleProfile}:${xCharacterLimit}:${GENERATION_PROMPT_VERSION}`
+        : `generated_mock_mode:${styleProfile}:${xCharacterLimit}:${GENERATION_PROMPT_VERSION}`,
     });
   } catch (error) {
     const errorMessage =

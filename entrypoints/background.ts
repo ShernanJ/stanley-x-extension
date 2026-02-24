@@ -1,8 +1,17 @@
-type WritingStyleProfile = 'cracked_engineer' | 'value_operator' | 'community';
+type WritingStyleProfile =
+  | 'cracked_engineer'
+  | 'value_operator'
+  | 'builder_in_public'
+  | 'community_builder'
+  | 'thought_leader'
+  | 'story_snap'
+  | 'relatable'
+  | 'signal_flex';
 
 type GenerateXDraftPayload = {
   threadId: string;
   sourceText: string;
+  referenceText?: string | null;
   sourceHash: string;
   previousSourceText: string | null;
   styleProfile?: WritingStyleProfile;
@@ -44,6 +53,7 @@ function isGenerateXDraftMessage(value: unknown): value is GenerateXDraftMessage
   }
 
   const rewriteInstructions = payload.rewriteInstructions;
+  const referenceText = payload.referenceText;
   const styleProfile = payload.styleProfile;
   const isXVerified = payload.isXVerified;
   const xCharacterLimit = payload.xCharacterLimit;
@@ -57,7 +67,16 @@ function isGenerateXDraftMessage(value: unknown): value is GenerateXDraftMessage
     typeof styleProfile === 'undefined' ||
     styleProfile === 'cracked_engineer' ||
     styleProfile === 'value_operator' ||
-    styleProfile === 'community';
+    styleProfile === 'builder_in_public' ||
+    styleProfile === 'community_builder' ||
+    styleProfile === 'thought_leader' ||
+    styleProfile === 'story_snap' ||
+    styleProfile === 'relatable' ||
+    styleProfile === 'signal_flex';
+  const referenceTextValid =
+    typeof referenceText === 'undefined' ||
+    referenceText === null ||
+    typeof referenceText === 'string';
   const verifiedValid =
     typeof isXVerified === 'undefined' || typeof isXVerified === 'boolean';
   const xCharacterLimitValid =
@@ -76,6 +95,7 @@ function isGenerateXDraftMessage(value: unknown): value is GenerateXDraftMessage
     typeof payload.threadId === 'string' &&
     typeof payload.sourceText === 'string' &&
     typeof payload.sourceHash === 'string' &&
+    referenceTextValid &&
     rewriteInstructionsValid &&
     styleProfileValid &&
     verifiedValid &&
