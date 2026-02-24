@@ -11,7 +11,7 @@ export default defineConfig({
     host_permissions: ['http://localhost:8787/*'],
     web_accessible_resources: [
       {
-        resources: ['linkedin.svg', 'x.svg', 'x.png', 'x-verified.svg'],
+        resources: ['linkedin.svg', 'x.svg', 'x.png', 'x-verified.svg', 'stanley.png'],
         matches: ['https://stanley.stan.store/*', 'https://*.stanley.stan.store/*'],
       },
     ],
