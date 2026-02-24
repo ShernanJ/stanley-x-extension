@@ -14,6 +14,8 @@ type XDraftRequestBody = {
   rewriteInstructions?: unknown;
   isXVerified?: unknown;
   xCharacterLimit?: unknown;
+  lowercaseOnly?: unknown;
+  bypassHashCache?: unknown;
   force?: unknown;
 };
 
@@ -34,6 +36,7 @@ type GenerationRecord = {
   styleProfile: WritingStyleProfile;
   isXVerified: boolean;
   xCharacterLimit: number;
+  lowercaseOnly: boolean;
   rewriteInstructions: string;
   xText: string;
   generatedAt: number;
@@ -450,6 +453,36 @@ function getStyleProfileConfig(profile: WritingStyleProfile): StyleProfileConfig
   return STYLE_PROFILE_CONFIGS[profile];
 }
 
+function getStructureBlueprint(profile: WritingStyleProfile): string {
+  if (profile === 'value_operator') {
+    return [
+      'Structure blueprint for value operator:',
+      '[Hook] first paragraph: one clear, specific claim or observation.',
+      '[Value] middle paragraphs: practical method, concrete specifics, and one metric or tangible outcome when available.',
+      '[CTA] final paragraph: one direct call-to-action.',
+      'Do not print bracket labels. Use plain text paragraphs only.',
+    ].join(' ');
+  }
+
+  if (profile === 'cracked_engineer') {
+    return [
+      'Structure blueprint for cracked engineer:',
+      '[Hook] short opener.',
+      '[Build] what changed and why it matters.',
+      '[Close] concise final line.',
+      'Do not print bracket labels. Keep it punchy.',
+    ].join(' ');
+  }
+
+  return [
+    'Structure blueprint for community profile:',
+    '[Hook] relatable opener.',
+    '[Context] what happened and what was learned.',
+    '[Invite] warm, direct CTA.',
+    'Do not print bracket labels. Use plain text paragraphs only.',
+  ].join(' ');
+}
+
 function normalize(text: string): string {
   if (!text) return '';
   return String(text)
@@ -753,17 +786,88 @@ function getDynamicParagraphBounds(
   };
 }
 
+function getFirstSentence(text: string): string {
+  const normalized = normalize(text).trim();
+  if (!normalized) {
+    return '';
+  }
+
+  const sentenceEndMatch = normalized.match(/^(.{1,280}?)(?:[.!?](?:\s|$)|\n|$)/);
+  return normalize((sentenceEndMatch?.[1] ?? normalized).trim());
+}
+
+function inferBuildAnchor(sourceText: string): string | null {
+  const normalized = normalize(sourceText).toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (/\bchrome extension\b/.test(normalized)) {
+    return 'chrome extension';
+  }
+  if (/\bextension\b/.test(normalized)) {
+    return 'extension';
+  }
+
+  const builtMatch = normalized.match(
+    /\b(?:i|we)\s+built\s+(?:a|an|the)?\s*([a-z0-9][a-z0-9\- ]{2,48})/i,
+  );
+  if (builtMatch?.[1]) {
+    return builtMatch[1].trim();
+  }
+
+  return null;
+}
+
+function pickAnchorKeyword(anchor: string): string {
+  const normalized = normalize(anchor).toLowerCase();
+  if (!normalized) {
+    return '';
+  }
+
+  if (normalized.includes('extension')) {
+    return 'extension';
+  }
+
+  const stopwords = new Set([
+    'a',
+    'an',
+    'the',
+    'new',
+    'my',
+    'our',
+    'this',
+    'that',
+    'tool',
+    'app',
+    'project',
+  ]);
+  const tokens = normalized
+    .split(/[^a-z0-9]+/g)
+    .filter((token) => token.length > 2 && !stopwords.has(token));
+  if (!tokens.length) {
+    return normalized.split(/[^a-z0-9]+/g).filter(Boolean).pop() || '';
+  }
+  return tokens[tokens.length - 1];
+}
+
 function detectNarrativeViolations(
   sourceText: string,
   outputText: string,
   styleProfile: WritingStyleProfile,
+  xCharacterLimit: number,
 ): string[] {
   const source = normalize(sourceText);
   const output = normalize(outputText);
   const profileConfig = getStyleProfileConfig(styleProfile);
+  const isCompactUnverifiedMode = xCharacterLimit <= X_STANDARD_CHAR_LIMIT;
   const violations: string[] = [];
-  const minOutputChars = getDynamicMinOutputChars(source, profileConfig);
-  const paragraphBounds = getDynamicParagraphBounds(source, profileConfig);
+  let minOutputChars = getDynamicMinOutputChars(source, profileConfig);
+  let paragraphBounds = getDynamicParagraphBounds(source, profileConfig);
+  if (isCompactUnverifiedMode) {
+    minOutputChars = Math.min(minOutputChars, 170);
+    paragraphBounds = { min: 1, max: 4 };
+  }
 
   if (!output) {
     violations.push('Output is empty');
@@ -797,14 +901,16 @@ function detectNarrativeViolations(
     violations.push('First-person builder voice was removed');
   }
 
-  const anchors = extractImportantAnchors(source);
-  const missingAnchors = anchors.filter((anchor) => {
-    return !new RegExp(escapeRegExp(anchor), 'i').test(output);
-  });
-  if (missingAnchors.length >= 3) {
-    violations.push(
-      `Missing key specifics: ${missingAnchors.slice(0, 4).join(', ')}`,
-    );
+  if (!isCompactUnverifiedMode) {
+    const anchors = extractImportantAnchors(source);
+    const missingAnchors = anchors.filter((anchor) => {
+      return !new RegExp(escapeRegExp(anchor), 'i').test(output);
+    });
+    if (missingAnchors.length >= 3) {
+      violations.push(
+        `Missing key specifics: ${missingAnchors.slice(0, 4).join(', ')}`,
+      );
+    }
   }
 
   if (profileConfig.preferLowercase) {
@@ -821,7 +927,7 @@ function detectNarrativeViolations(
     }
   }
 
-  if (profileConfig.requireTacticalDensity) {
+  if (profileConfig.requireTacticalDensity && !isCompactUnverifiedMode) {
     if (!/\b\d+(\.\d+)?%?\b/.test(output)) {
       violations.push('Value operator style should include at least one concrete metric');
     }
@@ -835,6 +941,31 @@ function detectNarrativeViolations(
   if (profileConfig.preferFriendlyTone) {
     if (!/\b(you|we|your|us)\b/i.test(output)) {
       violations.push('Community style should keep a relational voice');
+    }
+  }
+
+  if (xCharacterLimit <= X_STANDARD_CHAR_LIMIT) {
+    if (paragraphCount > 4) {
+      violations.push('Unverified mode should stay compact with fewer paragraphs');
+    }
+
+    if (/"[^"\n]{10,}"/.test(output)) {
+      violations.push('Unverified mode should avoid quoted examples');
+    }
+
+    if (/\b(one reply stood out|for example|for instance)\b/i.test(output)) {
+      violations.push('Unverified mode should avoid examples and setup lines');
+    }
+
+    const buildAnchor = inferBuildAnchor(source);
+    if (buildAnchor) {
+      const keyword = pickAnchorKeyword(buildAnchor);
+      const firstSentence = getFirstSentence(output).toLowerCase();
+      if (keyword && !firstSentence.includes(keyword)) {
+        violations.push(
+          `First sentence must state what was built (missing: ${keyword})`,
+        );
+      }
     }
   }
 
@@ -911,6 +1042,14 @@ function enforceOutputShape(text: string, maxChars = MAX_X_OUTPUT_CHARS): string
   }
 
   return truncateAtNaturalBoundary(output, maxChars);
+}
+
+function applyCasePreference(text: string, lowercaseOnly: boolean): string {
+  const normalized = normalize(text);
+  if (!lowercaseOnly) {
+    return normalized;
+  }
+  return normalized.toLowerCase();
 }
 
 async function callGroq(
@@ -1025,24 +1164,32 @@ async function generateXDraftWithGroq(
   styleProfile: WritingStyleProfile,
   isXVerified: boolean,
   xCharacterLimit: number,
+  lowercaseOnly: boolean,
 ): Promise<string> {
   const profileConfig = getStyleProfileConfig(styleProfile);
+  const isCompactUnverifiedMode = xCharacterLimit <= X_STANDARD_CHAR_LIMIT;
   const effectiveMaxOutputChars = Math.max(
     120,
     Math.min(xCharacterLimit, X_VERIFIED_CHAR_LIMIT),
   );
-  const minOutputChars = Math.max(
+  let minOutputChars = Math.max(
     80,
     Math.min(
       getDynamicMinOutputChars(sourceText, profileConfig),
       Math.max(100, effectiveMaxOutputChars - 40),
     ),
   );
-  const paragraphBounds = getDynamicParagraphBounds(sourceText, profileConfig);
-  const maxOutputTokens = Math.max(
+  let paragraphBounds = getDynamicParagraphBounds(sourceText, profileConfig);
+  let maxOutputTokens = Math.max(
     180,
     Math.min(2000, Math.ceil(effectiveMaxOutputChars / 3.2)),
   );
+
+  if (isCompactUnverifiedMode) {
+    minOutputChars = Math.max(90, Math.min(170, minOutputChars));
+    paragraphBounds = { min: 1, max: 4 };
+    maxOutputTokens = Math.min(maxOutputTokens, 240);
+  }
 
   if (!GROQ_API_KEY) {
     return createMockXDraft(
@@ -1057,6 +1204,19 @@ async function generateXDraftWithGroq(
   const rewriteClause = rewriteInstructions
     ? `User rewrite instructions (highest priority): ${rewriteInstructions}`
     : 'No additional rewrite instructions were provided.';
+  const caseClause = lowercaseOnly
+    ? 'Capitalization mode: lowercase only. Output must be fully lowercase.'
+    : 'Capitalization mode: normal sentence capitalization. Do not force all-lowercase.';
+  const compactModeClause = isCompactUnverifiedMode
+    ? [
+        'Unverified compact mode is active.',
+        'In the first sentence, say exactly what was built.',
+        'Remove setup, examples, and quoted replies.',
+        'No fluff, no backstory, no motivational framing.',
+        'Prefer 2-4 short sentences total.',
+      ].join(' ')
+    : 'Standard compactness mode.';
+  const structureBlueprintClause = getStructureBlueprint(styleProfile);
   const strictFormatClause =
     [
       'Strict output format:',
@@ -1103,8 +1263,11 @@ async function generateXDraftWithGroq(
           'Start from the facts block. Keep intent and core facts. Remove LinkedIn framing.',
           profileClause,
           narrativeArcClause,
+          structureBlueprintClause,
           styleGuardClause,
           strictFormatClause,
+          caseClause,
+          compactModeClause,
           'Do not compress this into generic statements.',
           'Keep the concrete setup, observation, and what was built.',
           `Keep output <= ${effectiveMaxOutputChars} characters.`,
@@ -1129,12 +1292,20 @@ async function generateXDraftWithGroq(
     maxTokens: maxOutputTokens,
   });
 
-  let candidate = enforceOutputShape(primaryDraft, effectiveMaxOutputChars);
+  let candidate = applyCasePreference(
+    enforceOutputShape(primaryDraft, effectiveMaxOutputChars),
+    lowercaseOnly,
+  );
 
   for (let attempt = 0; attempt < MAX_STYLE_RETRIES; attempt += 1) {
     const violations = [
       ...detectStyleViolations(candidate),
-      ...detectNarrativeViolations(sourceText, candidate, styleProfile),
+      ...detectNarrativeViolations(
+        sourceText,
+        candidate,
+        styleProfile,
+        xCharacterLimit,
+      ),
     ];
     if (!violations.length) {
       return candidate;
@@ -1150,8 +1321,11 @@ async function generateXDraftWithGroq(
             'Keep only core facts and intent.',
             profileClause,
             narrativeArcClause,
+            structureBlueprintClause,
             styleGuardClause,
             strictFormatClause,
+            caseClause,
+            compactModeClause,
             rewriteClause,
             `Keep output <= ${effectiveMaxOutputChars} characters.`,
             'Return plain text only.',
@@ -1178,7 +1352,10 @@ async function generateXDraftWithGroq(
       maxTokens: maxOutputTokens,
     });
 
-    candidate = enforceOutputShape(retryDraft, effectiveMaxOutputChars);
+    candidate = applyCasePreference(
+      enforceOutputShape(retryDraft, effectiveMaxOutputChars),
+      lowercaseOnly,
+    );
   }
 
   return candidate;
@@ -1260,6 +1437,8 @@ const server = createServer(async (req, res) => {
       typeof body.rewriteInstructions === 'string' ? body.rewriteInstructions : '',
     );
     const isXVerified = Boolean(body.isXVerified);
+    const lowercaseOnly = Boolean(body.lowercaseOnly);
+    const bypassHashCache = Boolean(body.bypassHashCache);
     const xCharacterLimit = sanitizeXCharacterLimit(
       body.xCharacterLimit,
       isXVerified,
@@ -1289,10 +1468,11 @@ const server = createServer(async (req, res) => {
       : 'no-rewrite';
     const styleHash = sha256(styleProfile);
     const limitHash = sha256(`${isXVerified ? 'verified' : 'unverified'}:${xCharacterLimit}`);
+    const caseHash = sha256(lowercaseOnly ? 'lowercase_only' : 'normal_caps');
 
-    const cacheKey = `${threadId}:${sourceHash}:${rewriteHash}:${styleHash}:${limitHash}`;
+    const cacheKey = `${threadId}:${sourceHash}:${rewriteHash}:${styleHash}:${limitHash}:${caseHash}`;
     const cachedRecord = cacheByThreadAndHash.get(cacheKey);
-    if (cachedRecord) {
+    if (cachedRecord && !bypassHashCache) {
       json(res, 200, {
         ok: true,
         xText: cachedRecord.xText,
@@ -1304,7 +1484,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const latestKey = `${threadId}:${rewriteHash}:${styleHash}:${limitHash}`;
+    const latestKey = `${threadId}:${rewriteHash}:${styleHash}:${limitHash}:${caseHash}`;
     const lastRecord = latestByThreadAndRewrite.get(latestKey);
     if (
       !force &&
@@ -1322,12 +1502,17 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const xText = await generateXDraftWithGroq(
+    const generatedXText = await generateXDraftWithGroq(
       sourceText,
       rewriteInstructions,
       styleProfile,
       isXVerified,
       xCharacterLimit,
+      lowercaseOnly,
+    );
+    const xText = applyCasePreference(
+      enforceOutputShape(generatedXText, xCharacterLimit),
+      lowercaseOnly,
     );
     const generatedAt = Date.now();
     const record: GenerationRecord = {
@@ -1337,6 +1522,7 @@ const server = createServer(async (req, res) => {
       styleProfile,
       isXVerified,
       xCharacterLimit,
+      lowercaseOnly,
       rewriteInstructions,
       xText,
       generatedAt,

@@ -9,6 +9,8 @@ type GenerateXDraftPayload = {
   rewriteInstructions?: string | null;
   isXVerified?: boolean;
   xCharacterLimit?: number;
+  lowercaseOnly?: boolean;
+  bypassHashCache?: boolean;
   force: boolean;
 };
 
@@ -45,6 +47,8 @@ function isGenerateXDraftMessage(value: unknown): value is GenerateXDraftMessage
   const styleProfile = payload.styleProfile;
   const isXVerified = payload.isXVerified;
   const xCharacterLimit = payload.xCharacterLimit;
+  const lowercaseOnly = payload.lowercaseOnly;
+  const bypassHashCache = payload.bypassHashCache;
   const rewriteInstructionsValid =
     typeof rewriteInstructions === 'undefined' ||
     rewriteInstructions === null ||
@@ -62,6 +66,10 @@ function isGenerateXDraftMessage(value: unknown): value is GenerateXDraftMessage
       Number.isFinite(xCharacterLimit) &&
       xCharacterLimit > 0 &&
       xCharacterLimit <= 25_000);
+  const lowercaseOnlyValid =
+    typeof lowercaseOnly === 'undefined' || typeof lowercaseOnly === 'boolean';
+  const bypassHashCacheValid =
+    typeof bypassHashCache === 'undefined' || typeof bypassHashCache === 'boolean';
 
   return (
     candidate.type === 'stanley-x:generate-x-draft' &&
@@ -71,7 +79,9 @@ function isGenerateXDraftMessage(value: unknown): value is GenerateXDraftMessage
     rewriteInstructionsValid &&
     styleProfileValid &&
     verifiedValid &&
-    xCharacterLimitValid
+    xCharacterLimitValid &&
+    lowercaseOnlyValid &&
+    bypassHashCacheValid
   );
 }
 
