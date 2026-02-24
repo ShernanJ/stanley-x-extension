@@ -162,28 +162,37 @@ export default defineBackground(() => {
     console.log('[Stanley-X] Background installed');
   });
 
-  browser.runtime.onMessage.addListener((message: unknown) => {
-    if (!isGenerateXDraftMessage(message)) {
-      return undefined;
-    }
+  browser.runtime.onMessage.addListener(
+    (
+      message: unknown,
+      _sender: unknown,
+      sendResponse: (response: GenerateXDraftResponse) => void,
+    ) => {
+      if (!isGenerateXDraftMessage(message)) {
+        return undefined;
+      }
 
-    return fetchXDraftFromBackend(message.payload)
-      .then((result) => {
-        console.log('[Stanley-X] X draft received from backend', {
-          cached: !!result.cached,
-          skipped: !!result.skipped,
-          reason: result.reason || null,
+      void fetchXDraftFromBackend(message.payload)
+        .then((result) => {
+          console.log('[Stanley-X] X draft received from backend', {
+            cached: !!result.cached,
+            skipped: !!result.skipped,
+            reason: result.reason || null,
+          });
+          sendResponse(result);
+        })
+        .catch((error: unknown) => {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error ?? 'Unknown error');
+          console.warn('[Stanley-X] X draft request failed', errorMessage);
+          sendResponse({
+            ok: false,
+            error: errorMessage,
+          } satisfies GenerateXDraftResponse);
         });
-        return result;
-      })
-      .catch((error: unknown) => {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error ?? 'Unknown error');
-        console.warn('[Stanley-X] X draft request failed', errorMessage);
-        return {
-          ok: false,
-          error: errorMessage,
-        } satisfies GenerateXDraftResponse;
-      });
-  });
+
+      // Keep the message channel open for async sendResponse in Chrome MV3.
+      return true;
+    },
+  );
 });

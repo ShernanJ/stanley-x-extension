@@ -112,6 +112,7 @@ export type ContentState = {
   feedbackModalEl: HTMLDivElement | null;
   feedbackModalAvatarEl: HTMLImageElement | null;
   feedbackModalNameEl: HTMLParagraphElement | null;
+  feedbackModalVerifiedEl: HTMLImageElement | null;
   feedbackModalHandleEl: HTMLParagraphElement | null;
   feedbackModalTweetTextEl: HTMLDivElement | null;
   feedbackModalImagesEl: HTMLDivElement | null;

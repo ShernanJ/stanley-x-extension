@@ -137,6 +137,7 @@ export default defineContentScript({
         feedbackModalEl: null,
         feedbackModalAvatarEl: null,
         feedbackModalNameEl: null,
+        feedbackModalVerifiedEl: null,
         feedbackModalHandleEl: null,
         feedbackModalTweetTextEl: null,
         feedbackModalImagesEl: null,
@@ -1273,14 +1274,14 @@ export default defineContentScript({
       sheet.className = 'stanley-x-style-info-sheet';
       sheet.setAttribute('role', 'dialog');
       sheet.setAttribute('aria-modal', 'true');
-      sheet.setAttribute('aria-label', 'LinkedIn and X writing guide');
+      sheet.setAttribute('aria-label', 'x writing guide');
 
       const head = document.createElement('div');
       head.className = 'stanley-x-style-info-head';
 
       const title = document.createElement('p');
       title.className = 'stanley-x-style-info-title';
-      title.textContent = 'LinkedIn vs X: Quick Guide';
+      title.textContent = 'x writing guide';
 
       const closeBtn = document.createElement('button');
       closeBtn.type = 'button';
@@ -1296,21 +1297,73 @@ export default defineContentScript({
       const cultureCopy = document.createElement('p');
       cultureCopy.className = 'stanley-x-style-info-copy';
       cultureCopy.textContent =
-        'LinkedIn rewards polished narrative and context. X rewards speed, clarity, and proof. This translator matters because the same idea can get ignored on X if it sounds LinkedIn-coded.';
+        'linkedin rewards polish and context. x rewards speed, clarity, and proof. this translator keeps your core idea but changes the delivery so it reads native on x.';
+
+      const formulaSection = document.createElement('section');
+      formulaSection.className = 'stanley-x-style-info-section';
+
+      const formulaTitle = document.createElement('h3');
+      formulaTitle.className = 'stanley-x-style-info-section-title';
+      formulaTitle.textContent = 'quick formula';
+
+      const formulaList = document.createElement('ul');
+      formulaList.className = 'stanley-x-style-info-list';
+      for (const item of [
+        'line 1: what happened or what you built.',
+        'line 2: one concrete proof (name, number, result, or quote).',
+        'line 3: why it matters or what changed.',
+      ]) {
+        const li = document.createElement('li');
+        li.className = 'stanley-x-style-info-item';
+        li.innerHTML =
+          '<span class="stanley-x-style-info-mark is-do">✓</span><span></span>';
+        const textEl = li.lastElementChild;
+        if (textEl) {
+          textEl.textContent = item;
+        }
+        formulaList.appendChild(li);
+      }
+      formulaSection.append(formulaTitle, formulaList);
+
+      const limitsSection = document.createElement('section');
+      limitsSection.className = 'stanley-x-style-info-section';
+
+      const limitsTitle = document.createElement('h3');
+      limitsTitle.className = 'stanley-x-style-info-section-title';
+      limitsTitle.textContent = 'length modes';
+
+      const limitsList = document.createElement('ul');
+      limitsList.className = 'stanley-x-style-info-list';
+      for (const item of [
+        'unverified: 280 chars max. one sharp idea, no fluff.',
+        'verified: up to 25k chars. can go deeper, still keep it scannable.',
+      ]) {
+        const li = document.createElement('li');
+        li.className = 'stanley-x-style-info-item';
+        li.innerHTML =
+          '<span class="stanley-x-style-info-mark is-do">✓</span><span></span>';
+        const textEl = li.lastElementChild;
+        if (textEl) {
+          textEl.textContent = item;
+        }
+        limitsList.appendChild(li);
+      }
+      limitsSection.append(limitsTitle, limitsList);
 
       const doSection = document.createElement('section');
       doSection.className = 'stanley-x-style-info-section';
 
       const doTitle = document.createElement('h3');
       doTitle.className = 'stanley-x-style-info-section-title';
-      doTitle.textContent = 'What Works On X';
+      doTitle.textContent = 'what works on x';
 
       const doList = document.createElement('ul');
       doList.className = 'stanley-x-style-info-list';
       for (const item of [
-        'Lead with the core point in the first line.',
-        'Use short lines, concrete details, and specific outcomes.',
-        'Let demo media do the heavy lifting when possible.',
+        'lead with the point immediately, then add proof.',
+        'keep short lines and clear spacing for fast scanning.',
+        'use concrete specifics over abstract statements.',
+        'let screenshots/video carry detail when possible.',
       ]) {
         const li = document.createElement('li');
         li.className = 'stanley-x-style-info-item';
@@ -1329,14 +1382,15 @@ export default defineContentScript({
 
       const dontTitle = document.createElement('h3');
       dontTitle.className = 'stanley-x-style-info-section-title';
-      dontTitle.textContent = 'What To Avoid';
+      dontTitle.textContent = 'what to avoid';
 
       const dontList = document.createElement('ul');
       dontList.className = 'stanley-x-style-info-list';
       for (const item of [
-        'Long warm-up intros before the main point.',
-        'Corporate tone, vague claims, or heavy hashtag stuffing.',
-        'Copying LinkedIn structure directly into X.',
+        'long warm-up intros before saying anything useful.',
+        'linkedin phrases, corporate tone, and hashtag dumping.',
+        'vague claims without names, numbers, or proof.',
+        'copy-pasting linkedin structure line-for-line.',
       ]) {
         const li = document.createElement('li');
         li.className = 'stanley-x-style-info-item';
@@ -1355,7 +1409,7 @@ export default defineContentScript({
 
       const archetypesTitle = document.createElement('h3');
       archetypesTitle.className = 'stanley-x-style-info-section-title';
-      archetypesTitle.textContent = 'Common Winning Archetypes';
+      archetypesTitle.textContent = 'common winning archetypes';
 
       const archetypes = document.createElement('div');
       archetypes.className = 'stanley-x-style-info-archetypes';
@@ -1363,22 +1417,30 @@ export default defineContentScript({
       const cracked = document.createElement('article');
       cracked.className = 'stanley-x-style-info-archetype';
       cracked.innerHTML =
-        '<p class="stanley-x-style-info-archetype-title">Cracked Engineers</p><p class="stanley-x-style-info-archetype-copy">Usually lowercase, intentionally short, minimal fluff. The demo photo/video carries most of the message.</p>';
+        '<p class="stanley-x-style-info-archetype-title">cracked engineers</p><p class="stanley-x-style-info-archetype-copy">usually lowercase, intentionally short, minimal fluff. media/demo does most of the work.</p>';
 
       const value = document.createElement('article');
       value.className = 'stanley-x-style-info-archetype';
       value.innerHTML =
-        '<p class="stanley-x-style-info-archetype-title">Value Operators</p><p class="stanley-x-style-info-archetype-copy">Share tactical value for free, then use a clear CTA (for example: reply to get the playbook) to drive engagement loops.</p>';
+        '<p class="stanley-x-style-info-archetype-title">value operators</p><p class="stanley-x-style-info-archetype-copy">share tactical value for free, then use a clear cta (for example: reply for the playbook).</p>';
 
       const community = document.createElement('article');
       community.className = 'stanley-x-style-info-archetype';
       community.innerHTML =
-        '<p class="stanley-x-style-info-archetype-title">Community Builders</p><p class="stanley-x-style-info-archetype-copy">More conversational and warm, but still direct. They win through clarity, replies, and consistent interaction.</p>';
+        '<p class="stanley-x-style-info-archetype-title">community builders</p><p class="stanley-x-style-info-archetype-copy">more conversational and friendly, still direct. they win through consistency and replies.</p>';
 
       archetypes.append(cracked, value, community);
       archetypesSection.append(archetypesTitle, archetypes);
 
-      sheet.append(head, cultureCopy, doSection, dontSection, archetypesSection);
+      sheet.append(
+        head,
+        cultureCopy,
+        formulaSection,
+        limitsSection,
+        doSection,
+        dontSection,
+        archetypesSection,
+      );
       modal.append(backdrop, sheet);
       document.body.append(modal);
 
@@ -1400,6 +1462,7 @@ export default defineContentScript({
       if (
         !state.feedbackModalAvatarEl ||
         !state.feedbackModalNameEl ||
+        !state.feedbackModalVerifiedEl ||
         !state.feedbackModalHandleEl ||
         !state.feedbackModalTweetTextEl ||
         !state.feedbackModalImagesEl
@@ -1424,6 +1487,12 @@ export default defineContentScript({
       state.feedbackModalAvatarEl.alt = name || 'Avatar';
       state.feedbackModalAvatarEl.style.visibility = avatarSrc ? 'visible' : 'hidden';
       state.feedbackModalNameEl.textContent = name || 'Creator';
+      if (state.feedbackModalVerifiedEl.getAttribute('src') !== xVerifiedIconUrl) {
+        state.feedbackModalVerifiedEl.src = xVerifiedIconUrl;
+      }
+      state.feedbackModalVerifiedEl.style.display = state.isXVerified
+        ? 'inline-flex'
+        : 'none';
       state.feedbackModalHandleEl.textContent = handle;
 
       const text = getVisiblePreviewText();
@@ -1505,6 +1574,12 @@ export default defineContentScript({
       const name = document.createElement('p');
       name.className = 'stanley-x-feedback-tweet-name';
 
+      const verified = document.createElement('img');
+      verified.className = 'stanley-x-feedback-tweet-verified';
+      verified.alt = 'Verified';
+      verified.src = xVerifiedIconUrl;
+      verified.style.display = 'none';
+
       const handle = document.createElement('p');
       handle.className = 'stanley-x-feedback-tweet-handle';
 
@@ -1516,7 +1591,7 @@ export default defineContentScript({
       time.className = 'stanley-x-feedback-tweet-time';
       time.textContent = 'now';
 
-      meta.append(name, handle, dot, time);
+      meta.append(name, verified, handle, dot, time);
       tweetHead.append(avatar, meta);
 
       const text = document.createElement('div');
@@ -1540,6 +1615,7 @@ export default defineContentScript({
       state.feedbackModalEl = modal;
       state.feedbackModalAvatarEl = avatar;
       state.feedbackModalNameEl = name;
+      state.feedbackModalVerifiedEl = verified;
       state.feedbackModalHandleEl = handle;
       state.feedbackModalTweetTextEl = text;
       state.feedbackModalImagesEl = images;
@@ -1643,7 +1719,7 @@ export default defineContentScript({
         window.open(
           composeUrl,
           '_blank',
-          'noopener,noreferrer,popup=yes,width=1100,height=900',
+          'noopener,noreferrer',
         );
       };
 
@@ -1682,6 +1758,25 @@ export default defineContentScript({
       }
     }
 
+    function isCopySuccessActive(copyButton: HTMLButtonElement): boolean {
+      const untilRaw = copyButton.dataset.stanleyXCopiedUntil;
+      if (!untilRaw) {
+        return false;
+      }
+      const until = Number(untilRaw);
+      if (!Number.isFinite(until)) {
+        return false;
+      }
+      return Date.now() < until;
+    }
+
+    function setCopySuccessState(
+      copyButton: HTMLButtonElement,
+      isActive: boolean,
+    ): void {
+      copyButton.classList.toggle('stanley-x-copy-success', isActive);
+    }
+
     function ensureCopyButtonHandler(): void {
       const copyButton = findPreviewCopyButton(state.postContainerEl);
 
@@ -1708,7 +1803,6 @@ export default defineContentScript({
         copyButton.dataset.stanleyXBaseTitle =
           copyButton.getAttribute('title') || 'Copy to clipboard';
       }
-      copyButton.dataset.stanleyXCopy = 'true';
 
       const handler = (event: MouseEvent): void => {
         if (state.mode !== 'x') {
@@ -1726,10 +1820,20 @@ export default defineContentScript({
             return;
           }
 
-          currentButton.setAttribute('title', copied ? 'Copied' : 'Unable to copy');
+          if (copied) {
+            currentButton.dataset.stanleyXCopiedUntil = String(Date.now() + 1200);
+            setCopySuccessState(currentButton, true);
+            currentButton.setAttribute('title', 'Copied');
+          } else {
+            currentButton.setAttribute('title', 'Unable to copy');
+          }
           window.setTimeout(() => {
             if (state.footerCopyButtonEl !== currentButton) {
               return;
+            }
+            if (!isCopySuccessActive(currentButton)) {
+              delete currentButton.dataset.stanleyXCopiedUntil;
+              setCopySuccessState(currentButton, false);
             }
             currentButton.setAttribute(
               'title',
@@ -1800,12 +1904,29 @@ export default defineContentScript({
 
       const copyButton = findPreviewCopyButton(state.postContainerEl);
       if (copyButton) {
-        copyButton.setAttribute(
-          'title',
-          state.mode === 'x'
-            ? 'Copy X post'
-            : copyButton.dataset.stanleyXBaseTitle || 'Copy to clipboard',
-        );
+        const isXMode = state.mode === 'x';
+        if (isXMode) {
+          copyButton.dataset.stanleyXCopy = 'true';
+        } else {
+          delete copyButton.dataset.stanleyXCopy;
+        }
+
+        if (isXMode && isCopySuccessActive(copyButton)) {
+          setCopySuccessState(copyButton, true);
+          if (copyButton.getAttribute('title') !== 'Copied') {
+            copyButton.setAttribute('title', 'Copied');
+          }
+        } else {
+          delete copyButton.dataset.stanleyXCopiedUntil;
+          setCopySuccessState(copyButton, false);
+          const nextTitle =
+            isXMode
+              ? 'Copy X post'
+              : copyButton.dataset.stanleyXBaseTitle || 'Copy to clipboard';
+          if (copyButton.getAttribute('title') !== nextTitle) {
+            copyButton.setAttribute('title', nextTitle);
+          }
+        }
       }
 
       const shareButton = findPreviewShareButton(state.postContainerEl);
@@ -1877,14 +1998,20 @@ export default defineContentScript({
       }, BACKEND_REQUEST_TIMEOUT_MS);
 
       try {
-        const response = await fetch(`${backendUrl}/v1/x-draft`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        });
+        let response: Response;
+        try {
+          response = await fetch(`${backendUrl}/v1/x-draft`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+            signal: controller.signal,
+          });
+        } catch (error: unknown) {
+          const message = formatErrorMessage(error);
+          throw new Error(`${message} (backend: ${backendUrl})`);
+        }
 
         let parsed: GenerateXDraftResponse | null = null;
         try {
@@ -1926,10 +2053,18 @@ export default defineContentScript({
         if (response?.error) {
           backgroundError = response.error;
         } else {
-          backgroundError = 'Background response was empty or invalid';
+          backgroundError =
+            'Background service worker returned no response. Reload the extension and try again.';
         }
       } catch (error: unknown) {
         backgroundError = formatErrorMessage(error);
+      }
+
+      if (
+        backgroundError &&
+        backgroundError.includes('Background service worker returned no response')
+      ) {
+        throw new Error(backgroundError);
       }
 
       console.warn(
@@ -2312,6 +2447,29 @@ export default defineContentScript({
         }
         .post-container.stanley-x-post-theme-x .linkedin-post-btn .material-symbols-rounded {
           color: #000000 !important;
+        }
+        .post-container.stanley-x-post-theme-x button[data-stanley-x-copy="true"] {
+          position: relative;
+        }
+        .post-container.stanley-x-post-theme-x button[data-stanley-x-copy="true"].stanley-x-copy-success {
+          width: 20px;
+          height: 20px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .post-container.stanley-x-post-theme-x button[data-stanley-x-copy="true"].stanley-x-copy-success svg {
+          display: none !important;
+        }
+        .post-container.stanley-x-post-theme-x button[data-stanley-x-copy="true"].stanley-x-copy-success::after {
+          content: '✓';
+          color: #00ba7c;
+          font-size: 18px;
+          font-weight: 700;
+          line-height: 1;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
         }
         .post-container.stanley-x-post-theme-x .create-image-btn {
           color: #ffffff !important;
@@ -3273,6 +3431,14 @@ export default defineContentScript({
           font-size: 15px;
           font-weight: 700;
           color: #e7e9ea;
+        }
+        .stanley-x-feedback-tweet-verified {
+          width: 16px;
+          height: 16px;
+          display: inline-flex;
+          flex-shrink: 0;
+          object-fit: contain;
+          transform: translateY(0.5px);
         }
         .stanley-x-feedback-tweet-handle,
         .stanley-x-feedback-tweet-time {

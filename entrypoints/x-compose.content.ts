@@ -64,19 +64,33 @@ function findComposeTextbox(): HTMLElement | null {
 }
 
 function getTextboxText(textbox: HTMLElement): string {
-  return normalize(textbox.innerText || '').trim();
+  const visibleText = normalize(textbox.innerText || '');
+  const fallbackText = normalize(textbox.textContent || '');
+  return normalize(visibleText || fallbackText).trim();
 }
 
-function selectTextboxContent(textbox: HTMLElement): void {
+function selectTextboxContent(textbox: HTMLElement, collapseToStart = false): void {
   const selection = window.getSelection();
   if (!selection) {
     return;
   }
   const range = document.createRange();
   range.selectNodeContents(textbox);
-  range.collapse(true);
+  if (collapseToStart) {
+    range.collapse(true);
+  }
   selection.removeAllRanges();
   selection.addRange(range);
+}
+
+function normalizeForComposeCompare(text: string): string {
+  return normalize(text.replace(/\u00a0/g, ' '))
+    .replace(/\r\n?/g, '\n')
+    .trim();
+}
+
+function isSameComposeText(a: string, b: string): boolean {
+  return normalizeForComposeCompare(a) === normalizeForComposeCompare(b);
 }
 
 function insertComposeText(textbox: HTMLElement, text: string): boolean {
@@ -107,7 +121,51 @@ function insertComposeText(textbox: HTMLElement, text: string): boolean {
     }),
   );
 
-  return getTextboxText(textbox).length > 0;
+  let currentText = getTextboxText(textbox);
+  if (isSameComposeText(currentText, normalizedText)) {
+    return true;
+  }
+
+  // DraftJS can occasionally keep only the last chunk after insertText;
+  // retry with select-all + line-break insertion before falling back.
+  try {
+    textbox.focus();
+    document.execCommand('selectAll', false);
+    document.execCommand('delete', false);
+    const lines = normalizedText.split('\n');
+    for (let index = 0; index < lines.length; index += 1) {
+      document.execCommand('insertText', false, lines[index] || '');
+      if (index < lines.length - 1) {
+        document.execCommand('insertLineBreak', false);
+      }
+    }
+  } catch {
+    // continue to fallback
+  }
+
+  textbox.dispatchEvent(
+    new InputEvent('input', {
+      bubbles: true,
+      inputType: 'insertText',
+      data: normalizedText,
+    }),
+  );
+
+  currentText = getTextboxText(textbox);
+  if (isSameComposeText(currentText, normalizedText)) {
+    return true;
+  }
+
+  textbox.textContent = normalizedText;
+  textbox.dispatchEvent(
+    new InputEvent('input', {
+      bubbles: true,
+      inputType: 'insertText',
+      data: normalizedText,
+    }),
+  );
+
+  return isSameComposeText(getTextboxText(textbox), normalizedText);
 }
 
 async function getPendingComposeDraft(
@@ -188,11 +246,9 @@ export default defineContentScript({
       }
 
       const currentText = getTextboxText(textbox);
-      if (currentText) {
-        if (currentText === pending.text) {
-          await consumePendingComposeDraft(composeId);
-          stop();
-        }
+      if (isSameComposeText(currentText, pending.text)) {
+        await consumePendingComposeDraft(composeId);
+        stop();
         return;
       }
 
