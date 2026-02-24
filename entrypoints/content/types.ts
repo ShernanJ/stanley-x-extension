@@ -82,6 +82,7 @@ export type ContentState = {
   xToolbarEl: HTMLDivElement | null;
   xContentEl: HTMLDivElement | null;
   xContentTextEl: HTMLDivElement | null;
+  xContentInputHandler: ((event: Event) => void) | null;
   rewriteToggleButtonEl: HTMLButtonElement | null;
   xVerifiedToggleButtonEl: HTMLButtonElement | null;
   rewritePanelEl: HTMLDivElement | null;
@@ -126,6 +127,8 @@ export type ContentState = {
   generationRequestId: number;
   activeGenerationRequestId: number | null;
   generationInFlightHash: string | null;
+  deferredEditGenerateTimer: number | null;
+  deferredEditGenerateDueAt: number | null;
   revisionHistory: XDraftRevision[];
   currentRevisionIndex: number;
   isXVerified: boolean;

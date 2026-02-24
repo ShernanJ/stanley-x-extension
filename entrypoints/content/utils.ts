@@ -125,6 +125,19 @@ export function countWords(text: string): number {
   return normalizedText.split(/\s+/).filter(Boolean).length;
 }
 
+export function formatCompactCharCount(value: number): string {
+  const count = Math.max(0, Math.floor(value));
+  if (count < 1000) {
+    return String(count);
+  }
+
+  const truncated = Math.floor((count / 1000) * 10) / 10;
+  if (Number.isInteger(truncated)) {
+    return `${truncated}k`;
+  }
+  return `${truncated.toFixed(1)}k`;
+}
+
 export function buildXComposeUrl(text: string): string {
   const composeUrl = new URL('https://x.com/compose/post');
   const normalizedText = normalize(text).trim();

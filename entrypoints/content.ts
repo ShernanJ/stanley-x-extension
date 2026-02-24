@@ -25,6 +25,7 @@ import {
   MAX_REWRITE_INSTRUCTIONS_CHARS,
   MAX_STORED_IMAGE_DATA_URL_LENGTH,
   MAX_WAIT_MS,
+  MIN_EDIT_GENERATION_INTERVAL_MS,
   X_STANDARD_CHAR_LIMIT,
   X_DRAFT_CACHE_PREFIX,
   X_DRAFT_HISTORY_LIMIT,
@@ -45,7 +46,7 @@ import {
 import { getThreadIdFromUrl, isThreadUrl } from './content/url';
 import {
   buildXComposeUrl,
-  countWords,
+  formatCompactCharCount,
   formatErrorMessage,
   isSignificantChange,
   normalize,
@@ -106,6 +107,7 @@ export default defineContentScript({
         xToolbarEl: null,
         xContentEl: null,
         xContentTextEl: null,
+        xContentInputHandler: null,
         rewriteToggleButtonEl: null,
         xVerifiedToggleButtonEl: null,
         rewritePanelEl: null,
@@ -150,6 +152,8 @@ export default defineContentScript({
         generationRequestId: 0,
         activeGenerationRequestId: null,
         generationInFlightHash: null,
+        deferredEditGenerateTimer: null,
+        deferredEditGenerateDueAt: null,
         revisionHistory: [],
         currentRevisionIndex: -1,
         isXVerified: false,
@@ -232,6 +236,93 @@ export default defineContentScript({
       state.xContentTextEl.textContent = getXDraftDisplayText();
     }
 
+    function placeCaretAtEnd(element: HTMLElement): void {
+      const selection = window.getSelection();
+      if (!selection) {
+        return;
+      }
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+
+    function updateXContentEditableState(): void {
+      if (!state.xContentTextEl) {
+        return;
+      }
+
+      const isEditable = state.mode === 'x' && state.xDraftStatus === 'ready';
+      state.xContentTextEl.contentEditable = isEditable ? 'true' : 'false';
+      state.xContentTextEl.setAttribute('spellcheck', isEditable ? 'true' : 'false');
+      state.xContentTextEl.setAttribute('aria-readonly', isEditable ? 'false' : 'true');
+      state.xContentTextEl.classList.toggle('is-editable', isEditable);
+    }
+
+    function persistCurrentXDraftText(nextText: string): void {
+      const normalizedText = normalize(nextText);
+      const selectedRevision = state.revisionHistory[state.currentRevisionIndex];
+      if (selectedRevision) {
+        selectedRevision.xText = normalizedText;
+        persistRevisionHistory();
+      }
+
+      const sourceHash = state.lastGeneratedSourceHash;
+      if (!sourceHash) {
+        return;
+      }
+
+      const cacheKey = getXDraftCacheKey(sourceHash);
+      const sourceText = state.lastGeneratedSourceText ?? getCurrentSourceText();
+      const generatedAt = state.lastGeneratedAt ?? Date.now();
+      void browser.storage.local
+        .set({
+          [cacheKey]: {
+            sourceHash,
+            sourceText,
+            xText: normalizedText,
+            generatedAt,
+          } satisfies XDraftCacheEntry,
+          stanley_x_lastXDraft: normalizedText,
+        })
+        .catch((error: unknown) => {
+          console.debug('[Stanley-X] local x-draft manual save skipped:', error);
+        });
+    }
+
+    function clearDeferredEditGenerationTimer(): void {
+      if (state.deferredEditGenerateTimer !== null) {
+        window.clearTimeout(state.deferredEditGenerateTimer);
+      }
+      state.deferredEditGenerateTimer = null;
+      state.deferredEditGenerateDueAt = null;
+    }
+
+    function scheduleDeferredEditGeneration(delayMs: number): void {
+      if (state.mode !== 'x') {
+        return;
+      }
+
+      const normalizedDelay = Math.max(600, Math.floor(delayMs));
+      const dueAt = Date.now() + normalizedDelay;
+      if (
+        state.deferredEditGenerateTimer !== null &&
+        state.deferredEditGenerateDueAt !== null &&
+        state.deferredEditGenerateDueAt <= dueAt
+      ) {
+        return;
+      }
+
+      clearDeferredEditGenerationTimer();
+      state.deferredEditGenerateDueAt = dueAt;
+      state.deferredEditGenerateTimer = window.setTimeout(() => {
+        state.deferredEditGenerateTimer = null;
+        state.deferredEditGenerateDueAt = null;
+        void maybeGenerateXDraft('edit');
+      }, normalizedDelay);
+    }
+
     function setXDraftState(
       status: XDraftStatus,
       options?: {
@@ -249,6 +340,7 @@ export default defineContentScript({
         state.xDraftError = null;
       }
       renderXContent();
+      updateXContentEditableState();
       updateRewritePanelUi();
       updateRevisionUi();
       updateFooterControls();
@@ -1121,25 +1213,56 @@ export default defineContentScript({
       state.footerCopyHandler = handler;
     }
 
+    function ensureXCharCounterElement(wordCountEl: HTMLElement): HTMLElement | null {
+      const parent = wordCountEl.parentElement;
+      if (!parent) {
+        return null;
+      }
+
+      const existing = parent.querySelector<HTMLElement>('.stanley-x-char-counter');
+      if (existing && existing !== wordCountEl) {
+        return existing;
+      }
+
+      const xCharCounter = wordCountEl.cloneNode(false) as HTMLElement;
+      xCharCounter.classList.add('stanley-x-char-counter');
+      xCharCounter.textContent = '';
+      xCharCounter.style.display = 'none';
+      xCharCounter.setAttribute('aria-hidden', 'true');
+      wordCountEl.insertAdjacentElement('afterend', xCharCounter);
+      return xCharCounter;
+    }
+
     function updateFooterControls(): void {
       ensureCopyButtonHandler();
 
       const wordCountEl = findPreviewWordCountEl(state.postContainerEl);
       if (wordCountEl) {
+        const xCharCounterEl = ensureXCharCounterElement(wordCountEl);
         if (state.mode === 'x') {
           const visibleText = getVisiblePreviewText();
-          const limit = getCurrentXCharacterLimit();
-          wordCountEl.textContent = `${visibleText.length}/${limit} chars · U ${X_STANDARD_CHAR_LIMIT} / V ${X_VERIFIED_CHAR_LIMIT.toLocaleString()}`;
-          wordCountEl.setAttribute(
-            'title',
-            state.isXVerified
-              ? `Verified mode: up to ${X_VERIFIED_CHAR_LIMIT.toLocaleString()} chars`
-              : `Unverified mode: up to ${X_STANDARD_CHAR_LIMIT} chars`,
-          );
+          const limitLabel = state.isXVerified ? '25k' : '280';
+          const visibleCharCountLabel = formatCompactCharCount(visibleText.length);
+          if (xCharCounterEl) {
+            xCharCounterEl.textContent = `${visibleCharCountLabel}/${limitLabel} chars`;
+            xCharCounterEl.setAttribute(
+              'title',
+              state.isXVerified
+                ? `Verified mode: up to ${formatCompactCharCount(X_VERIFIED_CHAR_LIMIT)} chars`
+                : `Unverified mode: up to ${formatCompactCharCount(X_STANDARD_CHAR_LIMIT)} chars`,
+            );
+            xCharCounterEl.style.display = '';
+            xCharCounterEl.setAttribute('aria-hidden', 'false');
+          }
+          wordCountEl.style.display = 'none';
+          wordCountEl.setAttribute('aria-hidden', 'true');
         } else {
-          const words = countWords(getVisiblePreviewText());
-          wordCountEl.textContent = `${words} ${words === 1 ? 'word' : 'words'}`;
-          wordCountEl.setAttribute('title', 'Word count');
+          wordCountEl.style.display = '';
+          wordCountEl.setAttribute('aria-hidden', 'false');
+          if (xCharCounterEl) {
+            xCharCounterEl.style.display = 'none';
+            xCharCounterEl.setAttribute('aria-hidden', 'true');
+          }
         }
       }
 
@@ -1298,6 +1421,10 @@ export default defineContentScript({
         return;
       }
 
+      if (trigger !== 'edit') {
+        clearDeferredEditGenerationTimer();
+      }
+
       const sourceText = getCurrentSourceText();
       const rewriteInstructions = stripAutoLimitInstructions(
         state.rewriteInstructions,
@@ -1308,6 +1435,23 @@ export default defineContentScript({
           error: null,
         });
         return;
+      }
+
+      if (trigger === 'edit') {
+        if (state.activeGenerationRequestId !== null) {
+          scheduleDeferredEditGeneration(1500);
+          return;
+        }
+
+        if (state.lastGeneratedAt !== null) {
+          const elapsedMs = Date.now() - state.lastGeneratedAt;
+          if (elapsedMs < MIN_EDIT_GENERATION_INTERVAL_MS) {
+            scheduleDeferredEditGeneration(
+              MIN_EDIT_GENERATION_INTERVAL_MS - elapsedMs,
+            );
+            return;
+          }
+        }
       }
 
       if (
@@ -1708,6 +1852,15 @@ export default defineContentScript({
           overflow-wrap: anywhere;
           word-break: break-word;
         }
+        .stanley-x-twitter-content-text.is-editable {
+          cursor: text;
+          min-height: 120px;
+        }
+        .stanley-x-twitter-content-text.is-editable:focus {
+          outline: none;
+          box-shadow: inset 0 0 0 1px #1d9bf0;
+          border-radius: 6px;
+        }
         .stanley-x-image-host {
           width: 100% !important;
           max-width: 100% !important;
@@ -1890,24 +2043,26 @@ export default defineContentScript({
           border: 1px solid #2f3336;
           border-radius: 999px;
           background: #0f1419;
-          color: #e7e9ea;
+          color: #8f98a2;
           display: inline-flex;
           align-items: center;
           justify-content: center;
           gap: 6px;
-          padding: 0 10px;
+          padding: 0 12px;
           font-size: 12px;
           font-weight: 600;
           cursor: pointer;
-          transition: border-color 0.15s ease, background-color 0.15s ease;
+          transition: border-color 0.15s ease, background-color 0.15s ease,
+            color 0.15s ease;
         }
         .stanley-x-verified-toggle:hover {
           border-color: #1d9bf0;
-          background: #15202b;
+          background: #111827;
+          color: #c8d0d8;
         }
         .stanley-x-verified-toggle.is-active {
-          border-color: #1d9bf0;
-          background: #15202b;
+          border: 2px solid #58b9ff;
+          background: #0f1419;
           color: #ffffff;
         }
         .stanley-x-verified-toggle-icon {
@@ -1915,6 +2070,22 @@ export default defineContentScript({
           height: 14px;
           display: block;
           object-fit: contain;
+          opacity: 0.65;
+          filter: grayscale(1) brightness(0.55);
+          transition: filter 0.15s ease, opacity 0.15s ease, filter 0.15s ease;
+        }
+        .stanley-x-verified-toggle.is-active .stanley-x-verified-toggle-icon {
+          opacity: 1;
+          filter: brightness(0) saturate(100%) invert(75%) sepia(41%)
+            saturate(6335%) hue-rotate(177deg) brightness(101%) contrast(101%);
+        }
+        .stanley-x-verified-toggle-label {
+          letter-spacing: 0.01em;
+          transition: color 0.15s ease, font-weight 0.15s ease;
+        }
+        .stanley-x-verified-toggle.is-active .stanley-x-verified-toggle-label {
+          color: #eaf6ff;
+          font-weight: 700;
         }
         .stanley-x-rewrite-panel {
           position: absolute;
@@ -2202,6 +2373,9 @@ export default defineContentScript({
     }
 
     function removeTwitterReplacement(): void {
+      if (state.xContentTextEl && state.xContentInputHandler) {
+        state.xContentTextEl.removeEventListener('input', state.xContentInputHandler);
+      }
       if (state.xHeaderEl) {
         state.xHeaderEl.remove();
       }
@@ -2215,6 +2389,7 @@ export default defineContentScript({
       }
       state.xContentEl = null;
       state.xContentTextEl = null;
+      state.xContentInputHandler = null;
       state.rewriteToggleButtonEl = null;
       state.xVerifiedToggleButtonEl = null;
       state.rewritePanelEl = null;
@@ -2227,6 +2402,7 @@ export default defineContentScript({
       state.revisionRevertButtonEl = null;
       state.rewritePanelOpen = false;
       state.rewriteTextareaExpanded = false;
+      clearDeferredEditGenerationTimer();
     }
 
     function updateRewritePanelUi(): void {
@@ -2273,9 +2449,16 @@ export default defineContentScript({
       state.xVerifiedToggleButtonEl.setAttribute(
         'title',
         state.isXVerified
-          ? `Verified enabled (${X_VERIFIED_CHAR_LIMIT.toLocaleString()} chars)`
-          : `Standard limit (${X_STANDARD_CHAR_LIMIT} chars)`,
+          ? `Verified enabled (${formatCompactCharCount(X_VERIFIED_CHAR_LIMIT)} chars)`
+          : `Standard limit (${formatCompactCharCount(X_STANDARD_CHAR_LIMIT)} chars)`,
       );
+      const labelEl =
+        state.xVerifiedToggleButtonEl.querySelector<HTMLElement>(
+          '.stanley-x-verified-toggle-label',
+        );
+      if (labelEl) {
+        labelEl.textContent = state.isXVerified ? 'Verified' : 'Unverified';
+      }
     }
 
     function applyPreviewTheme(isXMode: boolean): void {
@@ -2533,7 +2716,8 @@ export default defineContentScript({
         verifiedToggleIcon.src = xVerifiedIconUrl;
 
         const verifiedToggleLabel = document.createElement('span');
-        verifiedToggleLabel.textContent = 'Verified';
+        verifiedToggleLabel.className = 'stanley-x-verified-toggle-label';
+        verifiedToggleLabel.textContent = 'Unverified';
 
         verifiedToggle.append(verifiedToggleIcon, verifiedToggleLabel);
         verifiedToggle.addEventListener('click', () => {
@@ -2678,6 +2862,31 @@ export default defineContentScript({
 
         const xText = document.createElement('div');
         xText.className = 'stanley-x-twitter-content-text';
+        xText.setAttribute('role', 'textbox');
+        xText.setAttribute('aria-label', 'X post content');
+        xText.setAttribute('tabindex', '0');
+        const xTextInputHandler = () => {
+          if (state.mode !== 'x' || state.xDraftStatus !== 'ready') {
+            return;
+          }
+
+          const liveText = normalize(xText.innerText ?? '');
+          const clampedText = clampXTextToLimit(liveText);
+          if (clampedText !== liveText) {
+            xText.textContent = clampedText;
+            placeCaretAtEnd(xText);
+          }
+
+          if (clampedText === state.xDraftText) {
+            return;
+          }
+
+          state.xDraftText = clampedText;
+          persistCurrentXDraftText(clampedText);
+          updateFooterControls();
+          updateFeedbackModalContent();
+        };
+        xText.addEventListener('input', xTextInputHandler);
 
         xToolbar.append(controls, rewritePanel);
         xContent.append(xText);
@@ -2687,6 +2896,7 @@ export default defineContentScript({
         state.xToolbarEl = xToolbar;
         state.xContentEl = xContent;
         state.xContentTextEl = xText;
+        state.xContentInputHandler = xTextInputHandler;
         state.rewriteToggleButtonEl = rewriteButton;
         state.xVerifiedToggleButtonEl = verifiedToggle;
         state.rewritePanelEl = rewritePanel;
@@ -2722,6 +2932,7 @@ export default defineContentScript({
       updateRewritePanelUi();
       updateRevisionUi();
       renderXContent();
+      updateXContentEditableState();
       renderAttachedImages();
     }
 
@@ -2947,6 +3158,7 @@ export default defineContentScript({
 
     function cleanupEditorBinding(): void {
       clearCommitTimers();
+      clearDeferredEditGenerationTimer();
 
       if (state.postContentEl && state.onInput) {
         state.postContentEl.removeEventListener('input', state.onInput);
@@ -3164,6 +3376,7 @@ export default defineContentScript({
       if (nowUrl !== state.currentUrl) {
         state.currentUrl = nowUrl;
         state.threadId = getThreadIdFromUrl(nowUrl);
+        clearDeferredEditGenerationTimer();
         state.lastCommittedText = null;
         state.lastGeneratedSourceHash = null;
         state.lastGeneratedSourceText = null;
