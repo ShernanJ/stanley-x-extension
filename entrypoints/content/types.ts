@@ -35,6 +35,7 @@ export type PersistedXDraftHistory = {
 export type GenerateXDraftPayload = {
   threadId: string;
   sourceText: string;
+  referenceText?: string | null;
   sourceHash: string;
   previousSourceText: string | null;
   rewriteInstructions?: string | null;
@@ -78,6 +79,7 @@ export type ContentState = {
   maxWaitTimer: number | null;
   lastCommittedText: string | null;
   latestText: string;
+  persistedLinkedInText: string;
   mode: Mode;
   modeToggleHost: HTMLButtonElement | null;
   xHeaderEl: HTMLDivElement | null;
@@ -87,6 +89,7 @@ export type ContentState = {
   xContentInputHandler: ((event: Event) => void) | null;
   rewriteToggleButtonEl: HTMLButtonElement | null;
   xVerifiedToggleButtonEl: HTMLButtonElement | null;
+  xResetButtonEl: HTMLButtonElement | null;
   xStyleInfoButtonEl: HTMLButtonElement | null;
   rewriteCaseToggleButtonEl: HTMLButtonElement | null;
   rewritePanelEl: HTMLDivElement | null;
@@ -102,6 +105,7 @@ export type ContentState = {
   addImagesButtonEl: HTMLButtonElement | null;
   addImagesClickHandler: ((event: Event) => void) | null;
   addImagesInputEl: HTMLInputElement | null;
+  addImagesRenderSignature: string | null;
   attachedImages: AttachedImage[];
   feedbackButtonEl: HTMLButtonElement | null;
   feedbackClickHandler: ((event: MouseEvent) => void) | null;
@@ -129,6 +133,9 @@ export type ContentState = {
   xDraftStatus: XDraftStatus;
   xDraftText: string;
   xDraftError: string | null;
+  pendingInitialXModeGeneration: boolean;
+  xShowInitialLoadingBranding: boolean;
+  xInitialLoadingStartedAt: number | null;
   lastGeneratedSourceText: string | null;
   lastGeneratedSourceHash: string | null;
   lastGeneratedAt: number | null;

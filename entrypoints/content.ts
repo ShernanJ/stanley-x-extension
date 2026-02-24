@@ -23,6 +23,7 @@ import {
   MAX_IMAGE_DIMENSION,
   MAX_IMAGE_FILE_BYTES,
   MAX_REWRITE_INSTRUCTIONS_CHARS,
+  X_CLIENT_GENERATION_VERSION,
   MAX_STORED_IMAGE_DATA_URL_LENGTH,
   MAX_WAIT_MS,
   MIN_EDIT_GENERATION_INTERVAL_MS,
@@ -32,6 +33,7 @@ import {
   X_DRAFT_HISTORY_PREFIX,
   X_DRAFT_IMAGES_PREFIX,
   X_COMPOSE_PENDING_KEY,
+  LINKEDIN_DRAFT_STORAGE_PREFIX,
   X_VERIFIED_CHAR_LIMIT,
 } from './content/constants';
 import {
@@ -50,6 +52,7 @@ import {
   formatErrorMessage,
   isSignificantChange,
   normalize,
+  normalizeSentenceCapitalization,
   normalizeRewriteInstructions,
   sha256Hex,
   toAttachedImage,
@@ -101,6 +104,7 @@ export default defineContentScript({
         maxWaitTimer: null,
         lastCommittedText: null,
         latestText: '',
+        persistedLinkedInText: '',
         mode: 'linkedin',
         modeToggleHost: null,
         xHeaderEl: null,
@@ -110,6 +114,7 @@ export default defineContentScript({
         xContentInputHandler: null,
         rewriteToggleButtonEl: null,
         xVerifiedToggleButtonEl: null,
+        xResetButtonEl: null,
         xStyleInfoButtonEl: null,
         rewriteCaseToggleButtonEl: null,
         rewritePanelEl: null,
@@ -125,6 +130,7 @@ export default defineContentScript({
         addImagesButtonEl: null,
         addImagesClickHandler: null,
         addImagesInputEl: null,
+        addImagesRenderSignature: null,
         attachedImages: [],
         feedbackButtonEl: null,
         feedbackClickHandler: null,
@@ -152,6 +158,9 @@ export default defineContentScript({
         xDraftStatus: 'idle',
         xDraftText: '',
         xDraftError: null,
+        pendingInitialXModeGeneration: false,
+        xShowInitialLoadingBranding: false,
+        xInitialLoadingStartedAt: null,
         lastGeneratedSourceText: null,
         lastGeneratedSourceHash: null,
         lastGeneratedAt: null,
@@ -169,6 +178,8 @@ export default defineContentScript({
       const xIconUrl = browser.runtime.getURL('/x.svg');
       const xIconFallbackUrl = browser.runtime.getURL('/x.png');
       const xVerifiedIconUrl = browser.runtime.getURL('/x-verified.svg');
+      const stanleyLogoUrl = browser.runtime.getURL('/stanley.png');
+      const INITIAL_X_LOADING_MIN_MS = 2000;
 
     function getXDraftCacheKey(sourceHash: string): string {
       return `${X_DRAFT_CACHE_PREFIX}${sourceHash}`;
@@ -183,12 +194,57 @@ export default defineContentScript({
       return `${X_DRAFT_IMAGES_PREFIX}${threadId}`;
     }
 
+    function getLinkedInDraftKey(threadId: string): string {
+      return `${LINKEDIN_DRAFT_STORAGE_PREFIX}${threadId}`;
+    }
+
+    async function clearPersistedXGeneratedData(): Promise<void> {
+      const keysToRemove = new Set<string>([
+        'stanley_x_lastGeneratedSourceHash',
+        'stanley_x_lastGeneratedSourceText',
+        'stanley_x_lastGeneratedAt',
+        'stanley_x_lastXDraft',
+        X_COMPOSE_PENDING_KEY,
+      ]);
+
+      try {
+        const allStored = await browser.storage.local.get(null);
+        for (const key of Object.keys(allStored)) {
+          if (
+            key.startsWith(X_DRAFT_CACHE_PREFIX) ||
+            key.startsWith(X_DRAFT_HISTORY_PREFIX) ||
+            key.startsWith(X_DRAFT_IMAGES_PREFIX)
+          ) {
+            keysToRemove.add(key);
+          }
+        }
+      } catch (error: unknown) {
+        console.debug('[Stanley-X] x generated key scan skipped:', error);
+      }
+
+      if (keysToRemove.size === 0) {
+        return;
+      }
+
+      try {
+        await browser.storage.local.remove(Array.from(keysToRemove));
+      } catch (error: unknown) {
+        console.warn('[Stanley-X] x generated key clear failed:', error);
+      }
+    }
+
     function getCurrentSourceText(): string {
-      const liveText = normalize(state.postContentEl?.innerText ?? '');
+      const visibleText = normalize(state.postContentEl?.innerText ?? '');
+      const hiddenCompatibleText = normalize(state.postContentEl?.textContent ?? '');
+      const liveText = visibleText || hiddenCompatibleText;
       if (liveText) {
         return liveText;
       }
-      return normalize(state.latestText);
+      const latest = normalize(state.latestText);
+      if (latest) {
+        return latest;
+      }
+      return normalize(state.persistedLinkedInText);
     }
 
     function applyCapitalizationPreference(text: string): string {
@@ -197,6 +253,17 @@ export default defineContentScript({
         return normalizedText;
       }
       return normalizedText.toLowerCase();
+    }
+
+    function formatTextForCasePreference(text: string): string {
+      const normalizedText = normalize(text);
+      if (!normalizedText) {
+        return '';
+      }
+      if (state.rewriteLowercaseOnly) {
+        return normalizedText.toLowerCase();
+      }
+      return normalizeSentenceCapitalization(normalizedText);
     }
 
     function getCurrentXCharacterLimit(): number {
@@ -231,9 +298,50 @@ export default defineContentScript({
       return clampXTextToLimit(state.xDraftText);
     }
 
+    function shouldUseInitialXLoadingBranding(trigger: GenerateTrigger): boolean {
+      if (trigger !== 'toggle') {
+        return false;
+      }
+      if (!state.pendingInitialXModeGeneration) {
+        return false;
+      }
+      if (state.revisionHistory.length > 0) {
+        return false;
+      }
+      if (
+        state.lastGeneratedSourceHash ||
+        state.lastGeneratedSourceText ||
+        state.lastGeneratedAt
+      ) {
+        return false;
+      }
+      return !normalize(state.xDraftText).trim();
+    }
+
+    async function ensureInitialXLoadingDuration(
+      requestId: number,
+      shouldDelay: boolean,
+    ): Promise<void> {
+      if (!shouldDelay || state.xInitialLoadingStartedAt === null) {
+        return;
+      }
+      const elapsed = Date.now() - state.xInitialLoadingStartedAt;
+      const remaining = INITIAL_X_LOADING_MIN_MS - elapsed;
+      if (remaining > 0) {
+        await new Promise<void>((resolve) => {
+          window.setTimeout(resolve, remaining);
+        });
+      }
+      if (state.activeGenerationRequestId !== requestId) {
+        return;
+      }
+      state.xShowInitialLoadingBranding = false;
+      state.xInitialLoadingStartedAt = null;
+    }
+
     function getXDraftDisplayText(): string {
       if (state.xDraftStatus === 'loading') {
-        return 'Generating X draft...';
+        return 'Making your post X-coded...';
       }
       if (state.xDraftStatus === 'error') {
         const message = state.xDraftError || 'Unable to generate X draft right now.';
@@ -252,7 +360,73 @@ export default defineContentScript({
       if (!state.xContentTextEl) {
         return;
       }
-      state.xContentTextEl.textContent = getXDraftDisplayText();
+
+      if (state.xDraftStatus === 'loading') {
+        if (state.xContentTextEl.dataset.stanleyXLoadingBranding !== '1') {
+          state.xContentTextEl.dataset.stanleyXLoadingBranding = '1';
+          state.xContentTextEl.classList.add('stanley-x-loading-branding-host');
+          state.xContentTextEl.textContent = '';
+
+          const loadingWrap = document.createElement('div');
+          loadingWrap.className = 'stanley-x-loading-branding';
+
+          const logo = document.createElement('img');
+          logo.className = 'stanley-x-loading-branding-logo';
+          logo.src = stanleyLogoUrl;
+          logo.alt = 'Stanley';
+
+          const title = document.createElement('div');
+          title.className = 'stanley-x-loading-branding-title';
+          const titleText = document.createElement('span');
+          titleText.textContent = 'Stanley for';
+          const titleIcon = document.createElement('img');
+          titleIcon.className = 'stanley-x-loading-branding-x-icon';
+          titleIcon.src = xIconUrl;
+          titleIcon.alt = 'X';
+          titleIcon.addEventListener(
+            'error',
+            () => {
+              if (titleIcon.src !== xIconFallbackUrl) {
+                titleIcon.src = xIconFallbackUrl;
+              }
+            },
+            { once: true },
+          );
+          title.append(titleText, titleIcon);
+
+          const subtitle = document.createElement('p');
+          subtitle.className = 'stanley-x-loading-branding-subtitle';
+          const subtitleTyping = document.createElement('span');
+          subtitleTyping.className = 'stanley-x-loading-branding-subtitle-typing';
+          subtitleTyping.textContent = 'making your post x-coded';
+          subtitle.append(subtitleTyping);
+
+          const dots = document.createElement('div');
+          dots.className = 'stanley-x-loading-branding-dots';
+          for (let index = 0; index < 3; index += 1) {
+            const dot = document.createElement('span');
+            dots.appendChild(dot);
+          }
+
+          loadingWrap.append(logo, title, subtitle, dots);
+          state.xContentTextEl.appendChild(loadingWrap);
+        }
+        return;
+      }
+
+      if (state.xContentTextEl.dataset.stanleyXLoadingBranding === '1') {
+        delete state.xContentTextEl.dataset.stanleyXLoadingBranding;
+        state.xContentTextEl.classList.remove('stanley-x-loading-branding-host');
+      }
+
+      const nextText = getXDraftDisplayText();
+      if (
+        state.xContentTextEl.childElementCount === 0 &&
+        state.xContentTextEl.textContent === nextText
+      ) {
+        return;
+      }
+      state.xContentTextEl.textContent = nextText;
     }
 
     function placeCaretAtEnd(element: HTMLElement): void {
@@ -364,6 +538,7 @@ export default defineContentScript({
       updateRevisionUi();
       updateFooterControls();
       updateFeedbackModalContent();
+      renderAttachedImages();
     }
 
     function updateRevisionUi(): void {
@@ -463,7 +638,7 @@ export default defineContentScript({
       }
 
       state.lastGeneratedSourceHash = revision.sourceHash;
-      state.lastGeneratedSourceText = revision.sourceText;
+      state.lastGeneratedSourceText = normalize(getCurrentSourceText()) || revision.sourceText;
       state.lastGeneratedAt = revision.generatedAt;
       setXDraftState('ready', {
         text: revision.xText,
@@ -520,8 +695,12 @@ export default defineContentScript({
 
         const revisions = rawRevisions
           .map((item) => toRevision(item))
-          .filter((item): item is XDraftRevision => item !== null)
-          .sort((left, right) => right.generatedAt - left.generatedAt);
+          .filter((item): item is XDraftRevision => item !== null);
+        const persistedIndex =
+          typeof raw?.currentRevisionIndex === 'number' &&
+          Number.isFinite(raw.currentRevisionIndex)
+            ? Math.max(0, Math.floor(raw.currentRevisionIndex))
+            : 0;
 
         state.revisionHistory = revisions;
 
@@ -531,9 +710,38 @@ export default defineContentScript({
           return;
         }
 
-        selectRevision(0, { persist: false });
+        const targetIndex = Math.min(persistedIndex, revisions.length - 1);
+        selectRevision(targetIndex, { persist: false });
       } catch (error: unknown) {
         console.debug('[Stanley-X] x-draft history read skipped:', error);
+      }
+    }
+
+    async function loadPersistedLinkedInDraftForThread(
+      threadId: string,
+    ): Promise<void> {
+      const threadKey = getLinkedInDraftKey(threadId);
+      try {
+        const stored = await browser.storage.local.get([threadKey, 'stanley_x_lastDraft']);
+        if (threadId !== state.threadId) {
+          return;
+        }
+
+        const threadValue =
+          typeof stored[threadKey] === 'string' ? stored[threadKey] : '';
+        const globalValue =
+          typeof stored.stanley_x_lastDraft === 'string'
+            ? stored.stanley_x_lastDraft
+            : '';
+
+        const persisted = normalize(threadValue || globalValue);
+        state.persistedLinkedInText = persisted;
+        if (!normalize(state.latestText) && persisted) {
+          state.latestText = persisted;
+        }
+      } catch (error: unknown) {
+        state.persistedLinkedInText = '';
+        console.debug('[Stanley-X] linkedin draft read skipped:', error);
       }
     }
 
@@ -541,6 +749,49 @@ export default defineContentScript({
       state.revisionHistory = [];
       state.currentRevisionIndex = -1;
       updateRevisionUi();
+    }
+
+    async function resetXGeneratedState(): Promise<void> {
+      const confirmed = window.confirm(
+        'Clear all generated X drafts, rewrite history, and attached images, then start from scratch?\n\nThis will switch back to LinkedIn mode.',
+      );
+      if (!confirmed) {
+        return;
+      }
+
+      clearDeferredEditGenerationTimer();
+      state.generationRequestId += 1;
+      state.activeGenerationRequestId = null;
+      state.generationInFlightHash = null;
+
+      state.lastGeneratedSourceHash = null;
+      state.lastGeneratedSourceText = null;
+      state.lastGeneratedAt = null;
+      state.rewriteInstructions = '';
+      state.rewritePanelOpen = false;
+      state.rewriteTextareaExpanded = false;
+      state.rewriteLowercaseOnly = false;
+      state.isXVerified = false;
+      state.pendingInitialXModeGeneration = false;
+      state.xShowInitialLoadingBranding = false;
+      state.xInitialLoadingStartedAt = null;
+      if (state.rewriteTextareaEl) {
+        state.rewriteTextareaEl.value = '';
+      }
+
+      resetRevisionState();
+      state.attachedImages = [];
+      setXDraftState('idle', {
+        text: '',
+        error: null,
+      });
+      updateRewriteCaseToggleUi();
+      updateVerifiedToggleUi();
+      renderAttachedImages();
+      updateRewritePanelUi();
+
+      await clearPersistedXGeneratedData();
+      setMode('linkedin');
     }
 
     function revertToCurrentRevision(): void {
@@ -788,13 +1039,26 @@ export default defineContentScript({
         return;
       }
 
-      state.xImagesGridEl.replaceChildren();
       const imageCount = state.attachedImages.length;
       const useSingleColumn = imageCount <= 1;
+      const renderSignature = [
+        state.mode,
+        state.xDraftStatus,
+        state.attachedImages.map((image) => image.id).join('|'),
+      ].join('::');
+      if (state.addImagesRenderSignature === renderSignature) {
+        return;
+      }
+      state.addImagesRenderSignature = renderSignature;
+
+      createImageHost.style.cursor = '';
+      state.xImagesGridEl.replaceChildren();
       state.xImagesGridEl.classList.toggle('is-single', useSingleColumn);
       state.xImagesGridEl.classList.toggle('is-multi', !useSingleColumn);
+      state.xImagesGridEl.classList.toggle('is-empty', imageCount === 0);
 
       if (state.mode !== 'x') {
+        createImageHost.style.display = '';
         createImageHost.classList.remove('stanley-x-image-host');
         state.xImagesGridEl.style.display = 'none';
         createImageButton.style.display = '';
@@ -802,8 +1066,18 @@ export default defineContentScript({
         return;
       }
 
+      if (state.xDraftStatus === 'loading') {
+        createImageHost.style.display = 'none';
+        state.xImagesGridEl.style.display = 'none';
+        createImageButton.style.display = 'none';
+        updateFeedbackModalContent();
+        return;
+      }
+
+      createImageHost.style.display = '';
       createImageHost.classList.add('stanley-x-image-host');
       createImageButton.style.display = 'none';
+      createImageHost.style.cursor = imageCount === 0 ? 'pointer' : '';
 
       for (const image of state.attachedImages) {
         const card = document.createElement('div');
@@ -823,11 +1097,7 @@ export default defineContentScript({
           removeAttachedImage(image.id);
         });
 
-        const name = document.createElement('p');
-        name.className = 'stanley-x-image-name';
-        name.textContent = image.name;
-
-        card.append(thumb, remove, name);
+        card.append(thumb, remove);
         state.xImagesGridEl.append(card);
       }
 
@@ -852,6 +1122,8 @@ export default defineContentScript({
     function applyAddImagesButtonMode(): void {
       const createImageButton = findPreviewCreateImageButton(state.postContainerEl);
       const createImageHost = findPreviewCreateImageHost(state.postContainerEl);
+      const previousButton = state.addImagesButtonEl;
+      const previousHost = state.addImagesHostEl;
 
       if (state.addImagesButtonEl !== createImageButton) {
         if (state.addImagesButtonEl && state.addImagesClickHandler) {
@@ -862,11 +1134,26 @@ export default defineContentScript({
           );
         }
         state.addImagesButtonEl = createImageButton;
-        state.addImagesClickHandler = null;
+      }
+      if (state.addImagesHostEl !== createImageHost) {
+        if (state.addImagesHostEl && state.addImagesClickHandler) {
+          state.addImagesHostEl.removeEventListener(
+            'click',
+            state.addImagesClickHandler,
+            true,
+          );
+        }
       }
       state.addImagesHostEl = createImageHost;
 
       if (!createImageButton || !createImageHost) {
+        state.addImagesRenderSignature = null;
+        if (
+          (previousButton || previousHost) &&
+          state.addImagesClickHandler
+        ) {
+          state.addImagesClickHandler = null;
+        }
         return;
       }
 
@@ -883,6 +1170,7 @@ export default defineContentScript({
         grid.style.display = 'none';
         createImageHost.insertBefore(grid, createImageButton);
         state.xImagesGridEl = grid;
+        state.addImagesRenderSignature = null;
       }
 
       const labelEl = createImageButton.querySelector('span');
@@ -899,14 +1187,34 @@ export default defineContentScript({
 
         if (!state.addImagesClickHandler) {
           const handler = (event: Event): void => {
+            if (state.mode !== 'x' || state.xDraftStatus === 'loading') {
+              return;
+            }
+            const target = event.target;
+            if (!(target instanceof HTMLElement)) {
+              return;
+            }
+            if (target.closest('.stanley-x-image-remove')) {
+              return;
+            }
+            if (
+              state.attachedImages.length > 0 &&
+              !target.closest('.stanley-x-image-add-tile') &&
+              !target.closest('.create-image-btn')
+            ) {
+              return;
+            }
             event.preventDefault();
             event.stopPropagation();
             event.stopImmediatePropagation();
             openImagePicker();
           };
-          createImageButton.addEventListener('click', handler, true);
           state.addImagesClickHandler = handler;
         }
+        createImageButton.removeEventListener('click', state.addImagesClickHandler, true);
+        createImageHost.removeEventListener('click', state.addImagesClickHandler, true);
+        createImageButton.addEventListener('click', state.addImagesClickHandler, true);
+        createImageHost.addEventListener('click', state.addImagesClickHandler, true);
         renderAttachedImages();
       } else {
         if (labelEl) {
@@ -921,6 +1229,7 @@ export default defineContentScript({
         }
         if (state.addImagesClickHandler) {
           createImageButton.removeEventListener('click', state.addImagesClickHandler, true);
+          createImageHost.removeEventListener('click', state.addImagesClickHandler, true);
           state.addImagesClickHandler = null;
         }
       }
@@ -1265,7 +1574,9 @@ export default defineContentScript({
       if (state.mode === 'x') {
         return getVisibleXText();
       }
-      return normalize(state.postContentEl?.innerText ?? state.latestText);
+      const visibleText = normalize(state.postContentEl?.innerText ?? '');
+      const hiddenCompatibleText = normalize(state.postContentEl?.textContent ?? '');
+      return normalize(visibleText || hiddenCompatibleText || state.latestText);
     }
 
     function createComposeDraftId(): string {
@@ -1654,11 +1965,19 @@ export default defineContentScript({
         clearDeferredEditGenerationTimer();
       }
 
+      const baselineSourceText = normalize(getCurrentSourceText());
       const sourceText =
         typeof options?.sourceTextOverride === 'string' &&
         normalize(options.sourceTextOverride).trim()
           ? normalize(options.sourceTextOverride)
-          : getCurrentSourceText();
+          : baselineSourceText;
+      const referenceText = (() => {
+        const persisted = normalize(state.persistedLinkedInText);
+        if (persisted) {
+          return persisted;
+        }
+        return sourceText;
+      })();
       const rewriteInstructions = stripAutoLimitInstructions(
         typeof options?.rewriteInstructionsOverride === 'string'
           ? options.rewriteInstructionsOverride
@@ -1697,7 +2016,7 @@ export default defineContentScript({
       if (
         trigger !== 'force' &&
         state.lastGeneratedSourceText &&
-        !isSignificantChange(state.lastGeneratedSourceText, sourceText)
+        !isSignificantChange(state.lastGeneratedSourceText, baselineSourceText || sourceText)
       ) {
         if (!state.xDraftText) {
           setXDraftState('idle', {
@@ -1719,7 +2038,12 @@ export default defineContentScript({
       const caseHashPart = `[x_case]\n${
         state.rewriteLowercaseOnly ? 'lowercase_only' : 'normal_caps'
       }`;
-      const sourceHashSeedWithTier = `${sourceHashSeed}\n\n${tierHashPart}\n\n${caseHashPart}`;
+      const referenceHashPart =
+        referenceText && referenceText !== sourceText
+          ? `\n\n[x_reference]\n${referenceText}`
+          : '';
+      const versionHashPart = `[x_client_generation_version]\n${X_CLIENT_GENERATION_VERSION}`;
+      const sourceHashSeedWithTier = `${sourceHashSeed}${referenceHashPart}\n\n${tierHashPart}\n\n${caseHashPart}\n\n${versionHashPart}`;
       const sourceHash = await sha256Hex(sourceHashSeedWithTier);
       if (!sourceHash) {
         return;
@@ -1745,7 +2069,7 @@ export default defineContentScript({
         if (trigger !== 'force' && cacheEntry?.xText) {
           const normalizedXText = normalize(cacheEntry.xText);
           const clampedCachedText = clampXTextToLimit(normalizedXText);
-          state.lastGeneratedSourceText = sourceText;
+          state.lastGeneratedSourceText = baselineSourceText || sourceText;
           state.lastGeneratedSourceHash = sourceHash;
           state.lastGeneratedAt = cacheEntry.generatedAt || Date.now();
           setXDraftState('ready', {
@@ -1765,10 +2089,20 @@ export default defineContentScript({
         console.debug('[Stanley-X] local x-draft cache read skipped:', error);
       }
 
+      const shouldShowInitialLoadingBranding =
+        shouldUseInitialXLoadingBranding(trigger);
+      state.pendingInitialXModeGeneration = false;
       state.generationRequestId += 1;
       const requestId = state.generationRequestId;
       state.activeGenerationRequestId = requestId;
       state.generationInFlightHash = sourceHash;
+      if (shouldShowInitialLoadingBranding) {
+        state.xShowInitialLoadingBranding = true;
+        state.xInitialLoadingStartedAt = Date.now();
+      } else {
+        state.xShowInitialLoadingBranding = false;
+        state.xInitialLoadingStartedAt = null;
+      }
       setXDraftState('loading', {
         error: null,
       });
@@ -1777,6 +2111,7 @@ export default defineContentScript({
         const payload: GenerateXDraftPayload = {
           threadId: getThreadIdFromUrl(window.location.href),
           sourceText,
+          referenceText: referenceText || null,
           sourceHash,
           previousSourceText: state.lastGeneratedSourceText,
           rewriteInstructions: rewriteInstructions || null,
@@ -1792,10 +2127,15 @@ export default defineContentScript({
           return;
         }
 
+        await ensureInitialXLoadingDuration(requestId, shouldShowInitialLoadingBranding);
+        if (state.activeGenerationRequestId !== requestId) {
+          return;
+        }
+
         const xText = clampXTextToLimit(normalize(result.xText || ''));
         const generatedAt = Date.now();
 
-        state.lastGeneratedSourceText = sourceText;
+        state.lastGeneratedSourceText = baselineSourceText || sourceText;
         state.lastGeneratedSourceHash = sourceHash;
         state.lastGeneratedAt = generatedAt;
         setXDraftState('ready', {
@@ -1826,7 +2166,7 @@ export default defineContentScript({
               generatedAt,
             } satisfies XDraftCacheEntry,
             stanley_x_lastGeneratedSourceHash: sourceHash,
-            stanley_x_lastGeneratedSourceText: sourceText,
+            stanley_x_lastGeneratedSourceText: baselineSourceText || sourceText,
             stanley_x_lastGeneratedAt: generatedAt,
             stanley_x_lastXDraft: xText,
           })
@@ -1834,6 +2174,11 @@ export default defineContentScript({
             console.debug('[Stanley-X] local x-draft cache write skipped:', error);
           });
       } catch (error: unknown) {
+        if (state.activeGenerationRequestId !== requestId) {
+          return;
+        }
+
+        await ensureInitialXLoadingDuration(requestId, shouldShowInitialLoadingBranding);
         if (state.activeGenerationRequestId !== requestId) {
           return;
         }
@@ -2048,24 +2393,14 @@ export default defineContentScript({
         }
         .stanley-x-twitter-header-badge {
           margin-left: 4px;
-          border-radius: 999px;
-          border: 1px solid #2f3336;
-          background: #ffffff;
-          color: #000000;
-          font-size: 10px;
-          font-weight: 700;
-          letter-spacing: 0.03em;
-          line-height: 1;
-          padding: 3px 7px;
-          text-transform: uppercase;
           flex-shrink: 0;
           display: inline-flex;
           align-items: center;
           justify-content: center;
         }
         .stanley-x-twitter-header-badge-icon {
-          width: 10px;
-          height: 10px;
+          width: 16px;
+          height: 16px;
           display: block;
           object-fit: contain;
         }
@@ -2098,14 +2433,123 @@ export default defineContentScript({
           overflow-wrap: anywhere;
           word-break: break-word;
         }
+        .stanley-x-twitter-content-text.stanley-x-loading-branding-host {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 160px;
+        }
+        .stanley-x-loading-branding {
+          width: 100%;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 10px;
+          text-align: center;
+          animation: stanleyXLoadingPulse 1.4s ease-in-out infinite;
+        }
+        .stanley-x-loading-branding-logo {
+          width: 60px;
+          height: 60px;
+          border-radius: 14px;
+          object-fit: cover;
+          border: 1px solid #1f2937;
+          box-shadow: 0 8px 20px rgba(15, 23, 42, 0.45);
+        }
+        .stanley-x-loading-branding-title {
+          display: inline-flex;
+          align-items: center;
+          gap: 7px;
+          font-size: 18px;
+          line-height: 1.1;
+          font-weight: 700;
+          letter-spacing: 0.01em;
+          color: #e7e9ea;
+        }
+        .stanley-x-loading-branding-subtitle {
+          margin: 0;
+          font-size: 13px;
+          line-height: 1.2;
+          letter-spacing: 0.01em;
+          color: #9ca3af;
+          text-transform: lowercase;
+        }
+        .stanley-x-loading-branding-subtitle-typing {
+          display: inline-block;
+          white-space: nowrap;
+          overflow: hidden;
+          border-right: 2px solid #1d9bf0;
+          width: 0;
+          animation:
+            stanleyXTyping 1.55s steps(25, end) infinite alternate,
+            stanleyXCaret 0.75s steps(1, end) infinite;
+        }
+        .stanley-x-loading-branding-x-icon {
+          width: 22px;
+          height: 22px;
+          object-fit: contain;
+        }
+        .stanley-x-loading-branding-dots {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .stanley-x-loading-branding-dots > span {
+          width: 6px;
+          height: 6px;
+          border-radius: 999px;
+          background: #1d9bf0;
+          opacity: 0.3;
+          animation: stanleyXLoadingDot 1.1s ease-in-out infinite;
+        }
+        .stanley-x-loading-branding-dots > span:nth-child(2) {
+          animation-delay: 0.15s;
+        }
+        .stanley-x-loading-branding-dots > span:nth-child(3) {
+          animation-delay: 0.3s;
+        }
+        @keyframes stanleyXLoadingDot {
+          0%, 100% {
+            transform: translateY(0);
+            opacity: 0.3;
+          }
+          50% {
+            transform: translateY(-3px);
+            opacity: 1;
+          }
+        }
+        @keyframes stanleyXLoadingPulse {
+          0%, 100% {
+            opacity: 0.92;
+          }
+          50% {
+            opacity: 1;
+          }
+        }
+        @keyframes stanleyXTyping {
+          0% {
+            width: 0;
+          }
+          100% {
+            width: 25ch;
+          }
+        }
+        @keyframes stanleyXCaret {
+          0%, 49% {
+            border-right-color: #1d9bf0;
+          }
+          50%, 100% {
+            border-right-color: transparent;
+          }
+        }
         .stanley-x-twitter-content-text.is-editable {
           cursor: text;
           min-height: 120px;
         }
         .stanley-x-twitter-content-text.is-editable:focus {
           outline: none;
-          box-shadow: inset 0 0 0 1px #1d9bf0;
-          border-radius: 6px;
+          box-shadow: none;
         }
         .stanley-x-image-host {
           width: 100% !important;
@@ -2127,6 +2571,13 @@ export default defineContentScript({
         }
         .stanley-x-images-grid.is-single .stanley-x-image-thumb {
           aspect-ratio: 16 / 9;
+        }
+        .stanley-x-images-grid.is-empty {
+          cursor: pointer;
+        }
+        .stanley-x-images-grid.is-empty .stanley-x-image-add-tile {
+          width: 100%;
+          min-height: 160px;
         }
         .stanley-x-images-grid.is-multi .stanley-x-image-thumb {
           aspect-ratio: 1 / 1;
@@ -2177,7 +2628,7 @@ export default defineContentScript({
         .stanley-x-image-add-tile {
           border: 1px dashed #2f3336;
           border-radius: 10px;
-          background: #0f1419;
+          background: transparent;
           color: #e7e9ea;
           min-height: 112px;
           display: flex;
@@ -2194,7 +2645,7 @@ export default defineContentScript({
         .stanley-x-image-add-plus {
           font-size: 24px;
           line-height: 1;
-          color: #1d9bf0;
+          color: #ffffff;
         }
         .stanley-x-image-add-caption {
           font-size: 12px;
@@ -2284,7 +2735,7 @@ export default defineContentScript({
           filter: brightness(1.08);
         }
         .stanley-x-verified-toggle {
-          margin-left: auto;
+          margin-left: 0;
           height: 30px;
           border: 1px solid #2f3336;
           border-radius: 999px;
@@ -2334,32 +2785,56 @@ export default defineContentScript({
           font-weight: 700;
         }
         .stanley-x-style-info-btn {
-          width: 30px;
-          height: 30px;
-          border: 1px solid #2f3336;
-          border-radius: 999px;
-          background: #0f1419;
+          margin-left: auto;
+          width: 18px;
+          height: 18px;
+          border: 0;
+          border-radius: 0;
+          background: transparent;
           color: #8f98a2;
           display: inline-flex;
           align-items: center;
           justify-content: center;
           cursor: pointer;
-          transition: border-color 0.15s ease, background-color 0.15s ease,
-            color 0.15s ease;
+          transition: color 0.15s ease, opacity 0.15s ease;
           padding: 0;
+          opacity: 0.92;
         }
         .stanley-x-style-info-btn:hover {
-          border-color: #1d9bf0;
-          background: #111827;
-          color: #d6e2ee;
+          color: #1d9bf0;
+          opacity: 1;
         }
         .stanley-x-style-info-btn:disabled {
           opacity: 0.45;
           cursor: not-allowed;
         }
         .stanley-x-style-info-btn svg {
-          width: 14px;
-          height: 14px;
+          width: 16px;
+          height: 16px;
+          display: block;
+        }
+        .stanley-x-reset-btn {
+          width: 18px;
+          height: 18px;
+          border: 0;
+          border-radius: 0;
+          background: transparent;
+          color: #8f98a2;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          transition: color 0.15s ease, opacity 0.15s ease;
+          padding: 0;
+          opacity: 0.92;
+        }
+        .stanley-x-reset-btn:hover {
+          color: #f87171;
+          opacity: 1;
+        }
+        .stanley-x-reset-btn svg {
+          width: 16px;
+          height: 16px;
           display: block;
         }
         .stanley-x-rewrite-panel {
@@ -2390,6 +2865,12 @@ export default defineContentScript({
           gap: 10px;
           margin-bottom: 8px;
         }
+        .stanley-x-rewrite-header-actions {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          flex-shrink: 0;
+        }
         .stanley-x-rewrite-title {
           margin: 0;
           font-size: 11px;
@@ -2399,46 +2880,73 @@ export default defineContentScript({
           text-transform: uppercase;
         }
         .stanley-x-rewrite-chips-row {
-          display: flex;
-          align-items: flex-start;
-          justify-content: space-between;
-          gap: 10px;
+          display: block;
           margin-bottom: 10px;
         }
         .stanley-x-rewrite-chips {
           display: flex;
-          flex-wrap: wrap;
+          flex-wrap: nowrap;
           gap: 8px;
           margin-bottom: 0;
-          flex: 1;
-          min-width: 0;
+          overflow-x: auto;
+          padding-bottom: 2px;
         }
-        .stanley-x-case-toggle {
+        .stanley-x-case-switch {
           border: 1px solid #2f3336;
           border-radius: 999px;
           background: #0b1015;
           color: #9ba7b2;
-          padding: 7px 10px;
+          padding: 3px 10px 3px 5px;
           font-size: 11px;
           font-weight: 600;
           line-height: 1;
           cursor: pointer;
           white-space: nowrap;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
           transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
         }
-        .stanley-x-case-toggle:hover {
+        .stanley-x-case-switch:hover {
           border-color: #3b4a58;
           background: #10171f;
           color: #d3dbe2;
         }
-        .stanley-x-case-toggle.is-active {
+        .stanley-x-case-switch.is-active {
           border-color: #1d9bf0;
-          background: rgba(29, 155, 240, 0.14);
-          color: #d6ecff;
+          background: rgba(29, 155, 240, 0.12);
+          color: #eaf6ff;
         }
-        .stanley-x-case-toggle:disabled {
+        .stanley-x-case-switch:disabled {
           opacity: 0.45;
           cursor: not-allowed;
+        }
+        .stanley-x-case-switch-track {
+          position: relative;
+          width: 34px;
+          height: 20px;
+          border-radius: 999px;
+          background: #2f3336;
+          transition: background-color 0.15s ease;
+        }
+        .stanley-x-case-switch-thumb {
+          position: absolute;
+          top: 2px;
+          left: 2px;
+          width: 16px;
+          height: 16px;
+          border-radius: 999px;
+          background: #ffffff;
+          transition: transform 0.15s ease;
+        }
+        .stanley-x-case-switch.is-active .stanley-x-case-switch-track {
+          background: #1d9bf0;
+        }
+        .stanley-x-case-switch.is-active .stanley-x-case-switch-thumb {
+          transform: translateX(14px);
+        }
+        .stanley-x-case-switch-label {
+          letter-spacing: 0.01em;
         }
         .stanley-x-rewrite-chip {
           border: 1px solid #2f3336;
@@ -2461,6 +2969,18 @@ export default defineContentScript({
           opacity: 0.45;
           cursor: not-allowed;
         }
+        .stanley-x-rewrite-input-label {
+          margin: 2px 2px 6px;
+          color: #9aa4ad;
+          font-size: 12px;
+          font-weight: 700;
+          letter-spacing: 0.02em;
+          text-transform: uppercase;
+        }
+        .stanley-x-rewrite-input-row {
+          position: relative;
+          width: 100%;
+        }
         .stanley-x-rewrite-textarea {
           width: 100%;
           max-width: 100%;
@@ -2469,7 +2989,7 @@ export default defineContentScript({
           resize: none;
           border: 1px solid #253341;
           border-radius: 10px;
-          padding: 8px 10px;
+          padding: 8px 40px 8px 10px;
           font-size: 13px;
           line-height: 1.4;
           color: #e7e9ea;
@@ -2489,6 +3009,30 @@ export default defineContentScript({
           outline: 0;
           box-shadow: 0 0 0 2px rgba(29, 155, 240, 0.3);
           border-color: #1d9bf0;
+        }
+        .stanley-x-rewrite-enter-btn {
+          position: absolute;
+          right: 8px;
+          top: 8px;
+          width: 24px;
+          height: 24px;
+          border: 0;
+          border-radius: 999px;
+          background: transparent;
+          color: #8b98a5;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          transition: color 0.15s ease, background-color 0.15s ease;
+        }
+        .stanley-x-rewrite-enter-btn svg {
+          width: 16px;
+          height: 16px;
+        }
+        .stanley-x-rewrite-enter-btn:hover {
+          color: #1d9bf0;
+          background: rgba(29, 155, 240, 0.12);
         }
         .stanley-x-rewrite-apply {
           border: 0;
@@ -2738,7 +3282,7 @@ export default defineContentScript({
         }
         .stanley-x-feedback-tweet-text {
           margin: 0;
-          padding: 0 12px 12px;
+          padding: 0 12px 12px 62px;
           white-space: pre-wrap;
           font-size: 15px;
           line-height: 1.45;
@@ -2750,7 +3294,7 @@ export default defineContentScript({
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 8px;
-          padding: 0 12px 12px;
+          padding: 0 12px 12px 62px;
         }
         .stanley-x-feedback-tweet-images.is-single {
           grid-template-columns: minmax(0, 1fr);
@@ -2771,7 +3315,7 @@ export default defineContentScript({
         }
         .stanley-x-feedback-tweet-actions {
           border-top: 1px solid #2f3336;
-          padding: 8px 12px;
+          padding: 8px 12px 8px 62px;
           display: flex;
           align-items: center;
           gap: 18px;
@@ -2833,6 +3377,7 @@ export default defineContentScript({
       state.xContentInputHandler = null;
       state.rewriteToggleButtonEl = null;
       state.xVerifiedToggleButtonEl = null;
+      state.xResetButtonEl = null;
       state.xStyleInfoButtonEl = null;
       state.rewriteCaseToggleButtonEl = null;
       state.rewritePanelEl = null;
@@ -2845,6 +3390,8 @@ export default defineContentScript({
       state.revisionRevertButtonEl = null;
       state.rewritePanelOpen = false;
       state.rewriteTextareaExpanded = false;
+      state.xShowInitialLoadingBranding = false;
+      state.xInitialLoadingStartedAt = null;
       clearDeferredEditGenerationTimer();
     }
 
@@ -2927,16 +3474,6 @@ export default defineContentScript({
           ? 'Lowercase only output'
           : 'Normal capitalization output',
       );
-
-      const labelEl =
-        state.rewriteCaseToggleButtonEl.querySelector<HTMLElement>(
-          '.stanley-x-case-toggle-label',
-        );
-      if (labelEl) {
-        labelEl.textContent = state.rewriteLowercaseOnly
-          ? 'lowercase only'
-          : 'normal caps';
-      }
     }
 
     function applyPreviewTheme(isXMode: boolean): void {
@@ -3201,6 +3738,11 @@ export default defineContentScript({
         verifiedToggle.addEventListener('click', () => {
           persistRevisionHistory();
           state.isXVerified = !state.isXVerified;
+          // Tier switch should not be blocked by same-source debounce checks.
+          state.lastGeneratedSourceText = null;
+          state.lastGeneratedSourceHash = null;
+          state.lastGeneratedAt = null;
+          state.generationInFlightHash = null;
           state.rewriteInstructions = stripAutoLimitInstructions(
             state.rewriteInstructions,
           );
@@ -3213,7 +3755,16 @@ export default defineContentScript({
             text: '',
             error: null,
           });
-          void loadPersistedHistoryForThread(state.threadId);
+          void loadPersistedLinkedInDraftForThread(state.threadId).finally(() => {
+            void loadPersistedHistoryForThread(state.threadId).finally(() => {
+              if (state.mode !== 'x') {
+                return;
+              }
+              if (state.revisionHistory.length === 0 || shouldGenerateOnXModeToggle()) {
+                void maybeGenerateXDraft('toggle');
+              }
+            });
+          });
           updateFooterControls();
           updateFeedbackModalContent();
           if (linkedInHeaderCard) {
@@ -3232,11 +3783,23 @@ export default defineContentScript({
           openStyleInfoModal();
         });
 
+        const resetButton = document.createElement('button');
+        resetButton.type = 'button';
+        resetButton.className = 'stanley-x-reset-btn';
+        resetButton.setAttribute('aria-label', 'Clear X generated drafts');
+        resetButton.setAttribute('title', 'Clear X generated drafts');
+        resetButton.innerHTML =
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M7 6l1 14h8l1-14"></path><path d="M10 10v7"></path><path d="M14 10v7"></path></svg>';
+        resetButton.addEventListener('click', () => {
+          void resetXGeneratedState();
+        });
+
         controls.append(
           revisionControls,
           revisionRevert,
-          verifiedToggle,
           styleInfoButton,
+          resetButton,
+          verifiedToggle,
           rewriteButton,
         );
 
@@ -3254,53 +3817,28 @@ export default defineContentScript({
         rewriteApply.type = 'button';
         rewriteApply.className = 'stanley-x-rewrite-apply';
         rewriteApply.textContent = 'Apply Rewrite';
-        rewriteApply.addEventListener('click', () => {
-          const normalizedInstructions = normalizeRewriteInstructions(
-            rewriteTextarea.value,
-          );
-          if (state.xDraftStatus === 'loading') {
-            updateRewritePanelUi();
-            return;
-          }
-
-          state.rewriteInstructions = normalizedInstructions;
-          rewriteTextarea.value = normalizedInstructions;
-          state.rewritePanelOpen = false;
-          state.rewriteTextareaExpanded = false;
-          updateRewritePanelUi();
-          const rewriteSourceText =
-            state.mode === 'x' && state.xDraftStatus === 'ready'
-              ? getVisibleXText()
-              : getCurrentSourceText();
-          void maybeGenerateXDraft('force', {
-            sourceTextOverride: rewriteSourceText,
-            bypassHashCache: true,
-          });
-        });
-
-        rewriteHeader.append(rewriteTitle, rewriteApply);
 
         const rewriteChips = document.createElement('div');
         rewriteChips.className = 'stanley-x-rewrite-chips';
 
         const rewriteCaseToggle = document.createElement('button');
         rewriteCaseToggle.type = 'button';
-        rewriteCaseToggle.className = 'stanley-x-case-toggle';
+        rewriteCaseToggle.className = 'stanley-x-case-switch';
         rewriteCaseToggle.setAttribute('aria-pressed', 'false');
-        const rewriteCaseToggleLabel = document.createElement('span');
-        rewriteCaseToggleLabel.className = 'stanley-x-case-toggle-label';
-        rewriteCaseToggleLabel.textContent = 'normal caps';
-        rewriteCaseToggle.appendChild(rewriteCaseToggleLabel);
+        rewriteCaseToggle.innerHTML =
+          '<span class="stanley-x-case-switch-track"><span class="stanley-x-case-switch-thumb"></span></span><span class="stanley-x-case-switch-label">lowercase only</span>';
         rewriteCaseToggle.addEventListener('click', () => {
           if (state.xDraftStatus === 'loading') {
             return;
           }
           state.rewriteLowercaseOnly = !state.rewriteLowercaseOnly;
-          if (state.rewriteLowercaseOnly && state.xDraftStatus === 'ready') {
-            const lowercasedText = clampXTextToLimit(state.xDraftText);
-            if (lowercasedText !== state.xDraftText) {
-              state.xDraftText = lowercasedText;
-              persistCurrentXDraftText(lowercasedText);
+          if (state.xDraftStatus === 'ready') {
+            const caseAdjustedText = clampXTextToLimit(
+              formatTextForCasePreference(state.xDraftText),
+            );
+            if (caseAdjustedText !== state.xDraftText) {
+              state.xDraftText = caseAdjustedText;
+              persistCurrentXDraftText(caseAdjustedText);
               renderXContent();
             }
           }
@@ -3309,32 +3847,21 @@ export default defineContentScript({
           updateFeedbackModalContent();
         });
 
+        const rewriteHeaderActions = document.createElement('div');
+        rewriteHeaderActions.className = 'stanley-x-rewrite-header-actions';
+        rewriteHeaderActions.append(rewriteCaseToggle, rewriteApply);
+        rewriteHeader.append(rewriteTitle, rewriteHeaderActions);
+
         const chipConfigs: Array<{ label: string; prompt: string }> = [
           {
-            label: 'More value-driven',
-            prompt: 'Make it more value-driven and tactical with clearer specifics.',
-          },
-          {
-            label: 'Sound cracked',
-            prompt: 'Make it sound cracked: concise, sharp, and no fluff.',
-          },
-          {
-            label: 'More community',
+            label: 'Longer',
             prompt:
-              'Make it more community-driven: friendlier and relatable while still direct.',
+              'Expand the current post with one more concrete detail while keeping the same core facts and X-native tone. Respect the active character limit.',
           },
           {
             label: 'Shorter',
-            prompt: 'Make it shorter and tighter while keeping the core specifics.',
-          },
-          {
-            label: 'Explain more',
             prompt:
-              'Explain more context and reasoning while staying X-native and direct.',
-          },
-          {
-            label: 'More direct',
-            prompt: 'Make it more direct, stern, and high-conviction.',
+              'Make the current post shorter and tighter while preserving concrete names/numbers and core facts. Avoid generic one-liner summaries.',
           },
         ];
 
@@ -3358,6 +3885,61 @@ export default defineContentScript({
         });
         rewriteTextarea.addEventListener('input', () => {
           updateRewritePanelUi();
+        });
+
+        const rewriteSubmitButton = document.createElement('button');
+        rewriteSubmitButton.type = 'button';
+        rewriteSubmitButton.className = 'stanley-x-rewrite-enter-btn';
+        rewriteSubmitButton.setAttribute('aria-label', 'Submit rewrite prompt');
+        rewriteSubmitButton.setAttribute('title', 'Submit (Enter)');
+        rewriteSubmitButton.innerHTML =
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h10a4 4 0 1 0 0-8h-2"></path><path d="m8 8-4 4 4 4"></path></svg>';
+
+        const submitRewritePrompt = (rawInstructions: string): void => {
+          if (state.xDraftStatus === 'loading') {
+            updateRewritePanelUi();
+            return;
+          }
+
+          const normalizedInstructions = normalizeRewriteInstructions(rawInstructions);
+          const rewriteSourceText =
+            state.mode === 'x' && state.xDraftStatus === 'ready'
+              ? getVisibleXText()
+              : getCurrentSourceText();
+          const isCurrentPostRewrite =
+            state.mode === 'x' &&
+            state.xDraftStatus === 'ready' &&
+            normalize(rewriteSourceText) !== normalize(getCurrentSourceText());
+          const effectiveInstructions = normalizedInstructions
+            ? normalizedInstructions
+            : isCurrentPostRewrite
+              ? 'Do a complete rewrite of the current post with fresh wording and structure. Keep the same core facts from the original LinkedIn draft. Do not return a near-duplicate of the current post.'
+              : '';
+
+          state.rewriteInstructions = normalizedInstructions;
+          rewriteTextarea.value = normalizedInstructions;
+          state.rewritePanelOpen = false;
+          state.rewriteTextareaExpanded = false;
+          updateRewritePanelUi();
+          void maybeGenerateXDraft('force', {
+            rewriteInstructionsOverride: effectiveInstructions,
+            persistRewriteInstructions: normalizedInstructions,
+            sourceTextOverride: rewriteSourceText,
+            bypassHashCache: true,
+          });
+        };
+
+        rewriteApply.addEventListener('click', () => {
+          submitRewritePrompt(rewriteTextarea.value);
+        });
+        rewriteSubmitButton.addEventListener('click', () => {
+          submitRewritePrompt(rewriteTextarea.value);
+        });
+        rewriteTextarea.addEventListener('keydown', (event: KeyboardEvent) => {
+          if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            submitRewritePrompt(rewriteTextarea.value);
+          }
         });
 
         const chipButtons: HTMLButtonElement[] = chipConfigs.map((chipConfig) => {
@@ -3392,9 +3974,22 @@ export default defineContentScript({
 
         const rewriteChipsRow = document.createElement('div');
         rewriteChipsRow.className = 'stanley-x-rewrite-chips-row';
-        rewriteChipsRow.append(rewriteChips, rewriteCaseToggle);
+        rewriteChipsRow.append(rewriteChips);
 
-        rewritePanel.append(rewriteHeader, rewriteChipsRow, rewriteTextarea);
+        const rewritePromptLabel = document.createElement('p');
+        rewritePromptLabel.className = 'stanley-x-rewrite-input-label';
+        rewritePromptLabel.textContent = 'Prompt:';
+
+        const rewriteInputRow = document.createElement('div');
+        rewriteInputRow.className = 'stanley-x-rewrite-input-row';
+        rewriteInputRow.append(rewriteTextarea, rewriteSubmitButton);
+
+        rewritePanel.append(
+          rewriteHeader,
+          rewriteChipsRow,
+          rewritePromptLabel,
+          rewriteInputRow,
+        );
 
         const xText = document.createElement('div');
         xText.className = 'stanley-x-twitter-content-text';
@@ -3435,6 +4030,7 @@ export default defineContentScript({
         state.xContentInputHandler = xTextInputHandler;
         state.rewriteToggleButtonEl = rewriteButton;
         state.xVerifiedToggleButtonEl = verifiedToggle;
+        state.xResetButtonEl = resetButton;
         state.xStyleInfoButtonEl = styleInfoButton;
         state.rewriteCaseToggleButtonEl = rewriteCaseToggle;
         state.rewritePanelEl = rewritePanel;
@@ -3544,6 +4140,8 @@ export default defineContentScript({
     }
 
     function applyFeedbackButtonMode(): void {
+      const previewButtonHtml =
+        '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"></path><circle cx="12" cy="12" r="3"></circle></svg><span class="text-base font-semibold whitespace-nowrap">Preview Post</span>';
       const feedbackBtn = findPreviewFeedbackButton(state.postContainerEl);
       if (state.feedbackButtonEl !== feedbackBtn) {
         if (state.feedbackButtonEl && state.feedbackClickHandler) {
@@ -3570,13 +4168,24 @@ export default defineContentScript({
       }
 
       if (state.mode === 'x') {
-        feedbackBtn.classList.add('stanley-x-feedback-preview');
-        feedbackBtn.innerHTML =
-          '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"></path><circle cx="12" cy="12" r="3"></circle></svg><span class="text-base font-semibold whitespace-nowrap">Preview Post</span>';
-        feedbackBtn.disabled = false;
-        feedbackBtn.setAttribute('aria-disabled', 'false');
+        if (
+          feedbackBtn.dataset.stanleyXFeedbackMode !== 'x' ||
+          feedbackBtn.innerHTML !== previewButtonHtml
+        ) {
+          feedbackBtn.classList.add('stanley-x-feedback-preview');
+          feedbackBtn.innerHTML = previewButtonHtml;
+          feedbackBtn.dataset.stanleyXFeedbackMode = 'x';
+        }
+        if (feedbackBtn.disabled) {
+          feedbackBtn.disabled = false;
+        }
+        if (feedbackBtn.getAttribute('aria-disabled') !== 'false') {
+          feedbackBtn.setAttribute('aria-disabled', 'false');
+        }
         feedbackBtn.classList.remove('stanley-x-feedback-disabled');
-        feedbackBtn.setAttribute('title', 'Preview X post');
+        if (feedbackBtn.getAttribute('title') !== 'Preview X post') {
+          feedbackBtn.setAttribute('title', 'Preview X post');
+        }
         if (!state.feedbackClickHandler) {
           const handler = (event: MouseEvent): void => {
             event.preventDefault();
@@ -3588,23 +4197,34 @@ export default defineContentScript({
           state.feedbackClickHandler = handler;
         }
       } else {
-        feedbackBtn.classList.remove('stanley-x-feedback-preview');
-        if (feedbackBtn.dataset.stanleyXBaseHtml) {
-          feedbackBtn.innerHTML = feedbackBtn.dataset.stanleyXBaseHtml;
+        if (feedbackBtn.dataset.stanleyXFeedbackMode === 'x') {
+          feedbackBtn.classList.remove('stanley-x-feedback-preview');
+          if (feedbackBtn.dataset.stanleyXBaseHtml) {
+            feedbackBtn.innerHTML = feedbackBtn.dataset.stanleyXBaseHtml;
+          }
+          feedbackBtn.dataset.stanleyXFeedbackMode = 'linkedin';
         }
         if (state.feedbackClickHandler) {
           feedbackBtn.removeEventListener('click', state.feedbackClickHandler, true);
           state.feedbackClickHandler = null;
         }
         closeFeedbackModal();
-        feedbackBtn.disabled = false;
-        feedbackBtn.setAttribute('aria-disabled', 'false');
+        if (feedbackBtn.disabled) {
+          feedbackBtn.disabled = false;
+        }
+        if (feedbackBtn.getAttribute('aria-disabled') !== 'false') {
+          feedbackBtn.setAttribute('aria-disabled', 'false');
+        }
         feedbackBtn.classList.remove('stanley-x-feedback-disabled');
         const originalTitle = feedbackBtn.dataset.stanleyXTitle;
         if (originalTitle) {
-          feedbackBtn.setAttribute('title', originalTitle);
+          if (feedbackBtn.getAttribute('title') !== originalTitle) {
+            feedbackBtn.setAttribute('title', originalTitle);
+          }
         } else {
-          feedbackBtn.removeAttribute('title');
+          if (feedbackBtn.hasAttribute('title')) {
+            feedbackBtn.removeAttribute('title');
+          }
         }
       }
     }
@@ -3627,8 +4247,15 @@ export default defineContentScript({
     }
 
     function setMode(mode: Mode): void {
+      const previousMode = state.mode;
       state.mode = mode;
+      if (mode === 'x' && previousMode !== 'x') {
+        state.pendingInitialXModeGeneration = true;
+      }
       if (mode !== 'x') {
+        state.pendingInitialXModeGeneration = false;
+        state.xShowInitialLoadingBranding = false;
+        state.xInitialLoadingStartedAt = null;
         state.rewritePanelOpen = false;
         closeStyleInfoModal();
       }
@@ -3640,13 +4267,15 @@ export default defineContentScript({
       updateFooterControls();
 
       if (mode === 'x') {
-        void loadPersistedHistoryForThread(state.threadId).finally(() => {
-          if (state.mode !== 'x') {
-            return;
-          }
-          if (shouldGenerateOnXModeToggle()) {
-            void maybeGenerateXDraft('toggle');
-          }
+        void loadPersistedLinkedInDraftForThread(state.threadId).finally(() => {
+          void loadPersistedHistoryForThread(state.threadId).finally(() => {
+            if (state.mode !== 'x') {
+              return;
+            }
+            if (shouldGenerateOnXModeToggle()) {
+              void maybeGenerateXDraft('toggle');
+            }
+          });
         });
       }
     }
@@ -3769,6 +4398,13 @@ export default defineContentScript({
           true,
         );
       }
+      if (state.addImagesHostEl && state.addImagesClickHandler) {
+        state.addImagesHostEl.removeEventListener(
+          'click',
+          state.addImagesClickHandler,
+          true,
+        );
+      }
       const imageButtonLabel = state.addImagesButtonEl?.querySelector('span');
       if (imageButtonLabel?.dataset.stanleyXOriginalLabel) {
         imageButtonLabel.textContent = imageButtonLabel.dataset.stanleyXOriginalLabel;
@@ -3787,6 +4423,7 @@ export default defineContentScript({
       state.addImagesButtonEl = null;
       state.addImagesHostEl = null;
       state.addImagesClickHandler = null;
+      state.addImagesRenderSignature = null;
       state.xImagesGridEl = null;
 
       if (state.feedbackButtonEl && state.feedbackClickHandler) {
@@ -3831,6 +4468,7 @@ export default defineContentScript({
       void browser.storage.local
         .set({
           stanley_x_lastDraft: text,
+          [getLinkedInDraftKey(state.threadId)]: text,
           stanley_x_lastUpdatedAt: Date.now(),
         })
         .catch((error: unknown) => {
@@ -3942,9 +4580,14 @@ export default defineContentScript({
         state.threadId = getThreadIdFromUrl(nowUrl);
         clearDeferredEditGenerationTimer();
         state.lastCommittedText = null;
+        state.latestText = '';
+        state.persistedLinkedInText = '';
         state.lastGeneratedSourceHash = null;
         state.lastGeneratedSourceText = null;
         state.lastGeneratedAt = null;
+        state.pendingInitialXModeGeneration = state.mode === 'x';
+        state.xShowInitialLoadingBranding = false;
+        state.xInitialLoadingStartedAt = null;
         state.rewriteInstructions = '';
         state.rewritePanelOpen = false;
         state.rewriteTextareaExpanded = false;
@@ -3960,6 +4603,7 @@ export default defineContentScript({
         renderAttachedImages();
 
         if (isThreadUrl(nowUrl)) {
+          void loadPersistedLinkedInDraftForThread(state.threadId);
           void loadPersistedHistoryForThread(state.threadId);
           void loadPersistedImagesForThread(state.threadId);
         }
@@ -4073,6 +4717,7 @@ export default defineContentScript({
     }
 
       ensureUi();
+      void loadPersistedLinkedInDraftForThread(state.threadId);
       void loadPersistedHistoryForThread(state.threadId);
       void loadPersistedImagesForThread(state.threadId);
       startLifecycleMonitoring();

@@ -22,6 +22,37 @@ export function normalizeRewriteInstructions(text: string): string {
   return normalize(text).trim().slice(0, MAX_REWRITE_INSTRUCTIONS_CHARS);
 }
 
+export function normalizeSentenceCapitalization(text: string): string {
+  const normalizedText = normalize(text);
+  if (!normalizedText) {
+    return '';
+  }
+
+  const chars = [...normalizedText];
+  let capitalizeNext = true;
+
+  for (let index = 0; index < chars.length; index += 1) {
+    const char = chars[index];
+
+    if (capitalizeNext && /[a-z]/.test(char)) {
+      chars[index] = char.toUpperCase();
+      capitalizeNext = false;
+      continue;
+    }
+
+    if (/[A-Za-z]/.test(char)) {
+      capitalizeNext = false;
+      continue;
+    }
+
+    if (char === '\n' || char === '!' || char === '?' || char === '.') {
+      capitalizeNext = true;
+    }
+  }
+
+  return chars.join('').replace(/\bi\b/g, 'I');
+}
+
 export function formatErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
     return error.message;
