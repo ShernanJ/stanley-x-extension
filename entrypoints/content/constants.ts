@@ -24,3 +24,4 @@ export const MAX_IMAGE_DIMENSION = 1280;
 export const X_STANDARD_CHAR_LIMIT = 280;
 export const X_VERIFIED_CHAR_LIMIT = 25_000;
 export const MIN_EDIT_GENERATION_INTERVAL_MS = 12_000;
+export const X_COMPOSE_PENDING_KEY = 'stanley_x_pending_compose';

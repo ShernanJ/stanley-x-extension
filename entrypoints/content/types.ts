@@ -40,6 +40,8 @@ export type GenerateXDraftPayload = {
   rewriteInstructions?: string | null;
   isXVerified?: boolean;
   xCharacterLimit?: number;
+  lowercaseOnly?: boolean;
+  bypassHashCache?: boolean;
   force: boolean;
 };
 
@@ -85,6 +87,8 @@ export type ContentState = {
   xContentInputHandler: ((event: Event) => void) | null;
   rewriteToggleButtonEl: HTMLButtonElement | null;
   xVerifiedToggleButtonEl: HTMLButtonElement | null;
+  xStyleInfoButtonEl: HTMLButtonElement | null;
+  rewriteCaseToggleButtonEl: HTMLButtonElement | null;
   rewritePanelEl: HTMLDivElement | null;
   rewriteTextareaEl: HTMLTextAreaElement | null;
   rewriteApplyButtonEl: HTMLButtonElement | null;
@@ -110,6 +114,10 @@ export type ContentState = {
   feedbackModalCloseBtnEl: HTMLButtonElement | null;
   feedbackModalBackdropEl: HTMLDivElement | null;
   feedbackModalIsOpen: boolean;
+  styleInfoModalEl: HTMLDivElement | null;
+  styleInfoModalBackdropEl: HTMLDivElement | null;
+  styleInfoModalCloseBtnEl: HTMLButtonElement | null;
+  styleInfoModalIsOpen: boolean;
   footerShareButtonEl: HTMLButtonElement | null;
   footerShareHandler: ((event: MouseEvent) => void) | null;
   footerCopyButtonEl: HTMLButtonElement | null;
@@ -132,4 +140,5 @@ export type ContentState = {
   revisionHistory: XDraftRevision[];
   currentRevisionIndex: number;
   isXVerified: boolean;
+  rewriteLowercaseOnly: boolean;
 };
