@@ -1,5 +1,7 @@
 # stanley for x
 
+## EDIT: THIS IS NOT THE SAME PROJECT THAT SOLVES VITALII'S 0->1000 PROBLEM
+
 this is a chrome extension that helps turn linkedin-style drafts into x-native posts.
 
 the goal is simple:
