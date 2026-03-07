@@ -1,6 +1,8 @@
 # stanley for x
 
-## EDIT: THIS IS NOT THE SAME PROJECT THAT SOLVES VITALII'S 0->1000 PROBLEM
+## EDIT: THIS IS NOT THE SAME PROJECT THAT SOLVES VITALII'S 0->1000 PROBLEM, THIS IS THE PROJECT THAT LEAD TO HIM GIVING ME IT.
+
+## I'm Building Something Better :)
 
 this is a chrome extension that helps turn linkedin-style drafts into x-native posts.
 
