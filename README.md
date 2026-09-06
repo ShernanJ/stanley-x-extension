@@ -1,151 +1,276 @@
-# stanley for x
+# Stanley for X
 
-## EDIT: THIS IS NOT THE SAME PROJECT THAT SOLVES VITALII'S 0->1000 PROBLEM, THIS IS THE PROJECT THAT LEAD TO HIM GIVING ME IT.
+Chrome extension that turns LinkedIn-style drafts inside Stanley into posts that feel native to X.
 
-## I'm Building Something Better :)
+[Successor: Xpo](https://shernanjavier.com/work/xpo)
 
-this is a chrome extension that helps turn linkedin-style drafts into x-native posts.
+## The idea
 
-the goal is simple:
-- keep your core message
-- remove the linkedin-coded tone
-- make it feel like it belongs on x
+A good post on LinkedIn does not necessarily feel like a good post on X.
 
-## why i made this
+The platforms have different formatting, tone, length, and culture, so simply copying the same draft across both tends to feel out of place.
 
-i saw a post on x from emily about the stan hackathon and how she hired 4 engineers from it.
+Stanley for X was a small experiment around adding an **X mode directly inside Stanley** — keeping the original idea while rewriting and previewing it for a different platform.
+
+## What it does
+
+- Watches drafts directly inside Stanley thread pages
+- Generates an X-native version alongside the original draft
+- Supports shorter, longer, and custom rewrite instructions
+- Handles standard and verified X character limits
+- Keeps revision history between rewrites
+- Lets users edit generated posts directly
+- Supports image attachments and an X-style preview
+- Opens X compose with the final post already filled in
+
+## How it works
+
+```text
+Stanley draft
+     ↓
+Chrome extension
+     ↓
+Capture current content
+     ↓
+Rewrite request
+     ↓
+X-native draft
+     ↓
+Edit + revise
+     ↓
+Preview
+     ↓
+Open X compose
+````
+
+## Technical highlights
+
+* Injected a custom X workflow into an existing third-party web application
+* Observed changing draft state inside Stanley rather than requiring users to copy content into another tool
+* Built an AI-assisted revision loop with shorter, longer, and custom rewrite controls
+* Maintained per-thread revision state so users could move between generated versions
+* Added platform-aware character limits for standard and verified X accounts
+* Built image attachment and X-style preview flows directly into the extension UI
+* Handed posts off to X compose without automatically publishing on the user's behalf
+
+## Stack
+
+`Chrome Extension` · `TypeScript` · `Groq` · `Browser APIs`
+
+## X mode
+
+The main interaction is a LinkedIn / X mode switch embedded directly into Stanley.
+
+When X mode is active, the extension adds a lightweight workflow for adapting the current draft.
+
+### Rewriting
+
+Users can:
+
+* make a post shorter
+* make it longer
+* give a custom rewrite instruction
+* optionally force lowercase output
+* move backward and forward through revisions
+* manually edit the generated result
+
+### Platform limits
+
+The extension supports both X account modes:
+
+```text
+Standard account
+280 characters
+
+Verified account
+25,000 characters
+```
+
+Changing modes updates both the visible character limit and the rewrite behavior.
+
+### Preview and publishing
+
+Users can attach up to four images and preview the final post in an X-style interface before publishing.
+
+When ready, the extension opens:
+
+```text
+https://x.com/compose/post
+```
+
+and fills the compose box with the generated text.
+
+It intentionally does **not** automatically publish the post.
+
+## Architecture
+
+```text
+Stanley
+   ↓
+content script
+   ↓
+draft state
+   ↓
+extension UI
+   ↓
+rewrite request
+   ↓
+backend
+   ↓
+Groq
+   ↓
+generated revision
+   ↓
+local revision state
+   ↓
+preview / X compose
+```
+
+The extension sits on top of Stanley rather than replacing it.
+
+Stanley remains the source of the original draft while the extension manages the X-specific interface, rewriting workflow, revisions, preview, and final handoff.
+
+## Project origin
+
+I saw a post from Emily about Stan's build-in-public hiring experiments and how they had hired engineers through previous hackathons.
 
 <p align="center">
-  <img src=".github/images/screenshot-1.png" alt="screenshot 1" width="380" />
+  <img src=".github/images/screenshot-1.png" alt="Emily's post about Stan's hackathon hiring" width="380" />
 </p>
 
-what caught my attention was a reply saying the hiring strategy was awesome, but they almost didn't read the post because of the linkedin formatting.
+One reply stood out to me: they liked the hiring strategy, but said they almost skipped the post because it looked too much like a LinkedIn post.
 
 <p align="center">
-  <img src=".github/images/screenshot-2.png" alt="screenshot 2" width="380" />
+  <img src=".github/images/screenshot-2.png" alt="Reply about the LinkedIn-style formatting" width="380" />
 </p>
 
-that was the unlock for me.
+That was the idea.
 
-so i built this chrome extension to make the x version feel native while still fitting inside stanley by stan.store.
+Instead of building another standalone writing tool, I wanted to see what it would look like if the platform adaptation happened **inside Stanley**, where the draft already existed.
 
-## what it does
+So I built an X mode directly into the product.
 
-- watches the draft inside stanley thread pages
-- generates an x version side-by-side
-- supports unverified (280 chars) and verified (25k chars) modes
-- gives rewrite controls (shorter/longer + custom prompt)
-- supports lowercase-only rewriting
-- keeps revision history and lets you move between versions
-- lets you edit the x text directly
-- supports image attachments in x mode
-- opens x compose and pre-fills the post text
-- has an x-style preview modal so you can see the post before publishing
+This was the original Stanley for X experiment.
 
-## features
+It is separate from the later `0 → 1000` challenge project that eventually grew into **Xpo**.
 
-### x mode ui
-- linkedin/x mode toggle in the footer
-- x-style header (name, handle, timestamp, x icon)
-- compact toolbar with rewrite + revision navigation
+<details>
+<summary><strong>Run locally</strong></summary>
 
-### rewrite workflow
-- quick chips for shorter and longer rewrites
-- custom prompt input
-- press enter to submit rewrite
-- keeps output aligned to your current mode limits
-
-### verified vs unverified
-- unverified: `current/280 chars`
-- verified: `current/25k chars`
-- verified toggle updates the limit and generation behavior
-
-### media + preview
-- add up to 4 images
-- remove images from the grid
-- x preview modal shows text + attached images in tweet-like layout
-
-### post handoff
-- post button opens `https://x.com/compose/post`
-- extension fills the compose textbox with your generated text
-- it does not auto-post
-
-## tradeoffs
-
-- this is still limited because it does not truly understand your full x account context or post history the way stanley for linkedin understands linkedin context.
-- on x, content quality usually matters more than formatting alone, so formatting fixes by themselves are not enough.
-- x culture is very different from linkedin, and i am still actively learning and refining that translation layer.
-
-## setup (local)
-
-you only need 2 terminals: one for the extension and one for the backend.
-
-### 1) install dependencies
+Install dependencies:
 
 ```bash
 pnpm install
 ```
 
-### 2) add env file
+Create a `.env` file:
 
-create a `.env` in the project root:
-
-```bash
+```text
 GROQ_API_KEY=your_groq_key_here
 ```
 
-optional:
+Optional configuration:
 
-```bash
+```text
 GROQ_MODEL=llama-3.3-70b-versatile
 PORT=8787
 ```
 
-### 3) start backend
+Start the backend:
 
 ```bash
 pnpm backend:dev
 ```
 
-### 4) start extension dev server
-
-in a new terminal:
+In another terminal, start the extension:
 
 ```bash
 pnpm dev
 ```
 
-### 5) load extension in chrome
+Then open:
 
-1. open `chrome://extensions`
-2. enable developer mode
-3. click "load unpacked"
-4. select `.output/chrome-mv3-dev`
+```text
+chrome://extensions
+```
 
-### 6) use it
+Enable developer mode, select **Load unpacked**, and choose:
 
-1. go to <a href="https://stanley.stan.store" target="_blank">stanley.stan.store</a>
-2. write or generate your linkedin draft
-3. switch to x mode
-4. review/edit/rewrite
-5. preview post
-6. click post to open x compose
+```text
+.output/chrome-mv3-dev
+```
 
-## how to use it well
+Open Stanley and start or generate a draft.
 
-- start with your full linkedin draft in stanley
-- switch to x mode and let it generate once
-- use shorter/longer rewrite chips to tune voice
-- use lowercase-only toggle when you want a more cracked style
-- manually edit final lines before posting
+</details>
 
-## notes
+<details>
+<summary><strong>Implementation notes</strong></summary>
 
-- if you do not set `groq_api_key`, the app can still run in mock mode
-- all x drafts are editable in-place
-- refresh behavior uses saved draft/revision state per thread
+### Draft workflow
 
-<!-- add ui screenshots here -->
-<!-- ![x mode ui](./images/x-mode-ui.png) -->
-<!-- ![rewrite panel](./images/rewrite-panel.png) -->
-<!-- ![preview modal](./images/preview-modal.png) -->
+The extension keeps the original Stanley draft as the starting point and maintains separate X-specific revision state.
+
+```text
+original draft
+      ↓
+initial X rewrite
+      ↓
+revision 1
+      ↓
+revision 2
+      ↓
+manual edit
+      ↓
+final post
+```
+
+Users can move between revisions instead of losing previous generations.
+
+### Why integrate directly into Stanley?
+
+The goal was to reduce context switching.
+
+Instead of:
+
+```text
+Stanley
+   ↓
+copy
+   ↓
+another AI tool
+   ↓
+rewrite
+   ↓
+copy
+   ↓
+X
+```
+
+the experiment becomes:
+
+```text
+Stanley
+   ↓
+X mode
+   ↓
+rewrite
+   ↓
+X
+```
+
+### Tradeoffs
+
+* The extension does not understand the user's full X history or account context
+* Translating formatting alone is not enough to guarantee good X content
+* LinkedIn and X differ culturally as well as structurally
+* Rewrite quality depends heavily on the context available in the original draft
+* The project was intentionally scoped as a proof of concept rather than a complete creator intelligence system
+
+These limitations were part of what motivated the larger Xpo project.
+
+### Mock mode
+
+If `GROQ_API_KEY` is not configured, the application can still run using its mock behavior.
+
+</details>
