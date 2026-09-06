@@ -1,4 +1,4 @@
-# Stanley for X
+# Stanley for X Chrome Extension
 
 Chrome extension that turns LinkedIn-style drafts inside Stanley into posts that feel native to X.
 
